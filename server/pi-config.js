@@ -62,23 +62,38 @@ export function flattenModels(raw, { env = process.env } = {}) {
 }
 
 export async function discoverModels(provider, fetchImpl = globalThis.fetch) {
-  if (provider.api !== 'openai-completions') return [];
+  if (provider.api !== 'openai-completions') return { models: [], notes: [] };
   const url = provider.baseUrl.replace(/\/+$/, '') + '/models';
   const headers = provider.apiKey ? { authorization: `Bearer ${provider.apiKey}` } : {};
   const res = await fetchImpl(url, { headers });
-  if (!res.ok) throw new Error(`${url} ответил ${res.status}`);
+  // baseUrl намеренно не попадает в текст ошибки — заметки уходят в браузер как есть.
+  if (!res.ok) throw new Error(`ответил ${res.status}`);
   const body = await res.json();
-  return (body?.data ?? []).map(d => toModel(provider, { id: d.id }));
+  const list = Array.isArray(body?.data) ? body.data : [];
+  const models = [], notes = [];
+  for (const d of list) {
+    if (typeof d?.id !== 'string' || d.id === '') {
+      notes.push(`провайдер ${provider.name}: модель без id пропущена`);
+      continue;
+    }
+    models.push(toModel(provider, { id: d.id }));
+  }
+  return { models, notes };
 }
 
 async function readAuth(path) {
-  try { return JSON.parse(await readFile(path, 'utf8')); }
-  catch { return {}; }
+  let text;
+  try { text = await readFile(path, 'utf8'); }
+  catch { return { auth: {}, error: null }; } // отсутствие файла — не ошибка
+  try { return { auth: JSON.parse(text) ?? {}, error: null }; }
+  catch (e) { return { auth: {}, error: e.message }; }
 }
 
-function collectStrings(value, out) {
+// Ложные срабатывания (email, URL, id модели) собираются сюда нарочно:
+// пропустить настоящий секрет хуже, чем лишний раз заменить безобидную строку.
+function collectSecretCandidates(value, out) {
   if (typeof value === 'string') { if (value.length >= 8) out.add(value); return out; }
-  if (value && typeof value === 'object') for (const v of Object.values(value)) collectStrings(v, out);
+  if (value && typeof value === 'object') for (const v of Object.values(value)) collectSecretCandidates(v, out);
   return out;
 }
 
@@ -90,13 +105,17 @@ export async function loadConfig({
 } = {}) {
   let raw;
   try { raw = JSON.parse(await readFile(path, 'utf8')); }
-  catch {
-    return { providers: [], models: [], notes: [], secrets: new Set(),
+  catch (e) {
+    // Текст error фиксирован спецификацией дословно. Причину — только если models.json
+    // на месте, но не разбирается (JSON.parse кидает SyntaxError); отсутствие файла молчит.
+    const notes = e instanceof SyntaxError ? [`models.json не разобран — ${e.message}`] : [];
+    return { providers: [], models: [], notes, secrets: new Set(),
       error: `не найден ${path} — создайте его или укажите --pi-config` };
   }
 
-  const auth = await readAuth(authPath);
+  const { auth, error: authError } = await readAuth(authPath);
   const { providers, models, notes } = flattenModels(raw, { env });
+  if (authError) notes.push(`auth.json не разобран — ${authError}`);
 
   for (const p of providers) {
     if (p.apiKey) continue;
@@ -108,12 +127,15 @@ export async function loadConfig({
 
   for (const p of providers) {
     if (!p.supported || !p.dynamic) continue;
-    try { models.push(...await discoverModels(p, fetchImpl)); }
-    catch (e) { notes.push(`провайдер ${p.name}: список моделей не получен — ${e.message}`); }
+    try {
+      const found = await discoverModels(p, fetchImpl);
+      models.push(...found.models);
+      notes.push(...found.notes);
+    } catch (e) { notes.push(`провайдер ${p.name}: список моделей не получен — ${e.message}`); }
   }
 
   const secrets = new Set();
-  collectStrings(auth, secrets);
+  collectSecretCandidates(auth, secrets);
   for (const p of providers) if (p.apiKey) secrets.add(p.apiKey);
 
   return { providers, models, notes, secrets, error: null };
@@ -125,6 +147,10 @@ export function publicModels(models) {
 
 export function scrub(text, secrets) {
   let out = String(text ?? '');
-  for (const s of secrets ?? []) if (s && s.length >= 8) out = out.split(s).join('***');
+  // Порог длины здесь намеренно отсутствует: секреты уже отфильтрованы на входе
+  // в collectSecretCandidates. Сортировка по убыванию длины не даёт короткому секрету,
+  // который является префиксом более длинного, оставить хвост незачищенным.
+  const ordered = [...(secrets ?? [])].filter(Boolean).sort((a, b) => b.length - a.length);
+  for (const s of ordered) out = out.split(s).join('***');
   return out;
 }

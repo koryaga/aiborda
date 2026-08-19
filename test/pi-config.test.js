@@ -4,8 +4,11 @@ import { readFile, mkdtemp, writeFile, rm } from 'node:fs/promises';
 import { expandVars, flattenModels, toModel, discoverModels, loadConfig, publicModels, scrub } from '../server/pi-config.js';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
+import { fileURLToPath } from 'node:url';
 
 const raw = JSON.parse(await readFile(new URL('./fixtures/models.json', import.meta.url), 'utf8'));
+// fileURLToPath (не .pathname) декодирует пробелы и юникод в пути проекта корректно.
+const FIXTURE_MODELS_PATH = fileURLToPath(new URL('./fixtures/models.json', import.meta.url));
 
 test('expandVars разворачивает $VAR из окружения', () => {
   assert.equal(expandVars('$TEST_DS_KEY', { TEST_DS_KEY: 'секрет' }), 'секрет');
@@ -123,17 +126,57 @@ test('discoverModels читает /models и накладывает overrides', 
     assert.equal(url, 'http://localhost:11434/v1/models');
     return { ok: true, json: async () => ({ data: [{ id: 'gemma4:12b-mlx-64k' }, { id: 'qwen3.5:latest' }] }) };
   };
-  const models = await discoverModels(provider, fake);
+  const { models } = await discoverModels(provider, fake);
   assert.equal(models.length, 2);
   assert.equal(models[0].name, 'Гемма');
   assert.equal(models[0].contextWindow, 65536);
   assert.equal(models[1].name, 'qwen3.5:latest');
 });
 
+test('discoverModels пропускает элементы без id и не теряет остальные, с заметкой', async () => {
+  const provider = { name: 'gw', baseUrl: 'http://h', api: 'openai-completions', apiKey: '', compat: {}, overrides: {} };
+  const fake = async () => ({ ok: true, json: async () => ({ data: [{ name: 'x' }, { id: 'ok' }] }) });
+  const { models, notes } = await discoverModels(provider, fake);
+  assert.equal(models.length, 1);
+  assert.equal(models[0].id, 'ok');
+  assert.ok(notes.some(n => n.includes('gw') && n.includes('без id')));
+});
+
+test('discoverModels не падает на null-элементах в data', async () => {
+  const provider = { name: 'gw', baseUrl: 'http://h', api: 'openai-completions', apiKey: '', compat: {}, overrides: {} };
+  const fake = async () => ({ ok: true, json: async () => ({ data: [null, { id: 'ok' }] }) });
+  const { models } = await discoverModels(provider, fake);
+  assert.equal(models.length, 1);
+  assert.equal(models[0].id, 'ok');
+});
+
+test('discoverModels отдаёт пустой список, если data не массив', async () => {
+  const provider = { name: 'gw', baseUrl: 'http://h', api: 'openai-completions', apiKey: '', compat: {}, overrides: {} };
+  const fake = async () => ({ ok: true, json: async () => ({ data: {} }) });
+  const { models } = await discoverModels(provider, fake);
+  assert.deepEqual(models, []);
+});
+
+test('discoverModels отправляет Authorization при непустом ключе', async () => {
+  const provider = { name: 'gw', baseUrl: 'http://h', api: 'openai-completions', apiKey: 'секрет-ключ', compat: {}, overrides: {} };
+  let seenHeaders;
+  const fake = async (url, opts) => { seenHeaders = opts.headers; return { ok: true, json: async () => ({ data: [] }) }; };
+  await discoverModels(provider, fake);
+  assert.equal(seenHeaders.authorization, 'Bearer секрет-ключ');
+});
+
+test('discoverModels не отправляет Authorization при пустом ключе', async () => {
+  const provider = { name: 'gw', baseUrl: 'http://h', api: 'openai-completions', apiKey: '', compat: {}, overrides: {} };
+  let seenHeaders;
+  const fake = async (url, opts) => { seenHeaders = opts.headers; return { ok: true, json: async () => ({ data: [] }) }; };
+  await discoverModels(provider, fake);
+  assert.equal('authorization' in seenHeaders, false);
+});
+
 test('падение discovery не роняет загрузку, а даёт заметку', async () => {
   const fake = async () => { throw new Error('соединение отклонено'); };
   const res = await loadConfig({
-    path: new URL('./fixtures/models.json', import.meta.url).pathname,
+    path: FIXTURE_MODELS_PATH,
     authPath: '/no/such/auth.json',
     env: { TEST_DS_KEY: 'секрет' },
     fetchImpl: fake,
@@ -143,15 +186,55 @@ test('падение discovery не роняет загрузку, а даёт �
   assert.ok(res.notes.some(n => n.includes('ollama')));
 });
 
+test('заметка о неудачном discovery не содержит baseUrl', async () => {
+  const fake = async () => ({ ok: false, status: 401 });
+  const res = await loadConfig({
+    path: FIXTURE_MODELS_PATH,
+    authPath: '/no/such/auth.json',
+    env: { TEST_DS_KEY: 'секрет' },
+    fetchImpl: fake,
+  });
+  const note = res.notes.find(n => n.includes('ollama'));
+  assert.ok(note);
+  assert.ok(!note.includes('http'));
+});
+
 test('отсутствующий конфиг даёт пустой список и текст ошибки', async () => {
   const res = await loadConfig({ path: '/no/such/models.json', authPath: '/no/auth.json' });
   assert.deepEqual(res.models, []);
   assert.ok(res.error.includes('создайте его или укажите --pi-config'));
 });
 
+test('битый models.json даёт предписанный error и заметку с причиной', async () => {
+  const dir = await mkdtemp(join(tmpdir(), 'pi-config-'));
+  const modelsPath = join(dir, 'models.json');
+  await writeFile(modelsPath, '{ "providers": ', 'utf8');
+  try {
+    const res = await loadConfig({ path: modelsPath, authPath: '/no/such/auth.json' });
+    assert.ok(res.error.includes('создайте его или укажите --pi-config'));
+    assert.ok(res.notes.some(n => n.includes('models.json не разобран')));
+  } finally {
+    await rm(dir, { recursive: true, force: true });
+  }
+});
+
 test('publicModels отдаёт только три поля', () => {
   const out = publicModels([{ provider: 'p', id: 'i', contextWindow: 1, baseUrl: 'секрет', compat: {} }]);
   assert.deepEqual(Object.keys(out[0]).sort(), ['contextWindow', 'id', 'provider']);
+});
+
+test('publicModels на реальном результате loadConfig не содержит baseUrl и ключей', async () => {
+  const fake = async () => ({ ok: true, json: async () => ({ data: [] }) });
+  const res = await loadConfig({
+    path: FIXTURE_MODELS_PATH,
+    authPath: '/no/such/auth.json',
+    env: { TEST_DS_KEY: 'секрет-ключ-123' },
+    fetchImpl: fake,
+  });
+  const json = JSON.stringify(publicModels(res.models));
+  assert.ok(!json.includes('baseUrl'));
+  assert.ok(!json.includes('apiKey'));
+  assert.ok(!json.includes('секрет-ключ-123'));
 });
 
 test('loadConfig берёт apiKey из auth.json, когда его нет в models.json', async () => {
@@ -161,7 +244,7 @@ test('loadConfig берёт apiKey из auth.json, когда его нет в m
   try {
     const fake = async () => ({ ok: true, json: async () => ({ data: [] }) });
     const res = await loadConfig({
-      path: new URL('./fixtures/models.json', import.meta.url).pathname,
+      path: FIXTURE_MODELS_PATH,
       authPath,
       env: { TEST_DS_KEY: 'секрет' },
       fetchImpl: fake,
@@ -176,7 +259,7 @@ test('loadConfig берёт apiKey из auth.json, когда его нет в m
 test('loadConfig берёт apiKey из окружения, если его нет ни в models.json, ни в auth.json', async () => {
   const fake = async () => ({ ok: true, json: async () => ({ data: [] }) });
   const res = await loadConfig({
-    path: new URL('./fixtures/models.json', import.meta.url).pathname,
+    path: FIXTURE_MODELS_PATH,
     authPath: '/no/such/auth.json',
     env: { TEST_DS_KEY: 'секрет', EXOTIC_API_KEY: 'из-окружения' },
     fetchImpl: fake,
@@ -185,11 +268,133 @@ test('loadConfig берёт apiKey из окружения, если его не
   assert.equal(exotic.apiKey, 'из-окружения');
 });
 
-test('scrub заменяет секрет на звёздочки, но не трогает короткие строки', () => {
-  const secrets = new Set(['sk-secret-key-12345', 'ok']);
-  const text = 'Ошибка: ключ sk-secret-key-12345 не прошёл, а также ok осталось';
+test('приоритет ключа: models.json побеждает auth.json и окружение', async () => {
+  const dir = await mkdtemp(join(tmpdir(), 'pi-config-'));
+  const authPath = join(dir, 'auth.json');
+  await writeFile(authPath, JSON.stringify({ deepseek: { key: 'из-auth-json' } }));
+  try {
+    const fake = async () => ({ ok: true, json: async () => ({ data: [] }) });
+    const res = await loadConfig({
+      path: FIXTURE_MODELS_PATH,
+      authPath,
+      env: { TEST_DS_KEY: 'из-models-json', DEEPSEEK_API_KEY: 'из-окружения' },
+      fetchImpl: fake,
+    });
+    const ds = res.providers.find(p => p.name === 'deepseek');
+    assert.equal(ds.apiKey, 'из-models-json');
+  } finally {
+    await rm(dir, { recursive: true, force: true });
+  }
+});
+
+test('приоритет ключа: без значения в models.json побеждает auth.json над окружением (и работает запасное поле apiKey)', async () => {
+  const dir = await mkdtemp(join(tmpdir(), 'pi-config-'));
+  const authPath = join(dir, 'auth.json');
+  await writeFile(authPath, JSON.stringify({ exotic: { apiKey: 'из-auth-json' } }));
+  try {
+    const fake = async () => ({ ok: true, json: async () => ({ data: [] }) });
+    const res = await loadConfig({
+      path: FIXTURE_MODELS_PATH,
+      authPath,
+      env: { TEST_DS_KEY: 'секрет', EXOTIC_API_KEY: 'из-окружения' },
+      fetchImpl: fake,
+    });
+    const exotic = res.providers.find(p => p.name === 'exotic');
+    assert.equal(exotic.apiKey, 'из-auth-json');
+  } finally {
+    await rm(dir, { recursive: true, force: true });
+  }
+});
+
+test('loadConfig().secrets содержит ключи и из models.json, и из auth.json', async () => {
+  const dir = await mkdtemp(join(tmpdir(), 'pi-config-'));
+  const authPath = join(dir, 'auth.json');
+  await writeFile(authPath, JSON.stringify({ exotic: { key: 'секрет-из-auth-json' } }));
+  try {
+    const fake = async () => ({ ok: true, json: async () => ({ data: [] }) });
+    const res = await loadConfig({
+      path: FIXTURE_MODELS_PATH,
+      authPath,
+      env: { TEST_DS_KEY: 'секрет-из-models-json' },
+      fetchImpl: fake,
+    });
+    assert.ok(res.secrets.has('секрет-из-models-json'));
+    assert.ok(res.secrets.has('секрет-из-auth-json'));
+  } finally {
+    await rm(dir, { recursive: true, force: true });
+  }
+});
+
+test('битый auth.json даёт заметку и не роняет загрузку', async () => {
+  const dir = await mkdtemp(join(tmpdir(), 'pi-config-'));
+  const authPath = join(dir, 'auth.json');
+  await writeFile(authPath, '{ "deepseek": ', 'utf8');
+  try {
+    const fake = async () => ({ ok: true, json: async () => ({ data: [] }) });
+    const res = await loadConfig({
+      path: FIXTURE_MODELS_PATH,
+      authPath,
+      env: { TEST_DS_KEY: 'секрет' },
+      fetchImpl: fake,
+    });
+    assert.equal(res.error, null);
+    assert.ok(res.notes.some(n => n.includes('auth.json') && n.includes('не разобран')));
+  } finally {
+    await rm(dir, { recursive: true, force: true });
+  }
+});
+
+test('auth.json с литералом null не роняет загрузку', async () => {
+  const dir = await mkdtemp(join(tmpdir(), 'pi-config-'));
+  const authPath = join(dir, 'auth.json');
+  await writeFile(authPath, 'null', 'utf8');
+  try {
+    const fake = async () => ({ ok: true, json: async () => ({ data: [] }) });
+    const res = await loadConfig({
+      path: FIXTURE_MODELS_PATH,
+      authPath,
+      env: { TEST_DS_KEY: 'секрет' },
+      fetchImpl: fake,
+    });
+    assert.equal(res.error, null);
+  } finally {
+    await rm(dir, { recursive: true, force: true });
+  }
+});
+
+test('отсутствующий auth.json не даёт заметку', async () => {
+  const fake = async () => ({ ok: true, json: async () => ({ data: [] }) });
+  const res = await loadConfig({
+    path: FIXTURE_MODELS_PATH,
+    authPath: '/no/such/auth.json',
+    env: { TEST_DS_KEY: 'секрет' },
+    fetchImpl: fake,
+  });
+  assert.ok(!res.notes.some(n => n.includes('auth.json')));
+});
+
+test('scrub заменяет секрет на звёздочки', () => {
+  const secrets = new Set(['sk-secret-key-12345']);
+  const text = 'Ошибка: ключ sk-secret-key-12345 не прошёл';
   const out = scrub(text, secrets);
   assert.ok(!out.includes('sk-secret-key-12345'));
   assert.ok(out.includes('***'));
-  assert.ok(out.includes('ok осталось'));
+});
+
+test('scrub чистит секрет короче 8 символов', () => {
+  const out = scrub('ключ ollama использован', new Set(['ollama']));
+  assert.ok(!out.includes('ollama'));
+  assert.ok(out.includes('***'));
+});
+
+test('scrub с пустой строкой в секретах не портит текст', () => {
+  const out = scrub('привет мир', new Set(['']));
+  assert.equal(out, 'привет мир');
+});
+
+test('scrub маскирует пересекающиеся секреты полностью', () => {
+  const secrets = new Set(['sk-org-ABC', 'sk-org-ABC-proj-Z']);
+  const out = scrub('ключ sk-org-ABC-proj-Z в логах', secrets);
+  assert.ok(!out.includes('sk-org-ABC-proj-Z'));
+  assert.ok(!out.includes('-proj-Z'));
 });
