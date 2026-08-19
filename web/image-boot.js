@@ -84,7 +84,61 @@ function createImage(doc, send, opts) {
     }
   }
 
-  function buildDiff() { return ''; }
+  // Коалесцирование обязательно: getAttribute в момент доставки записи
+  // возвращает текущее значение, а не значение на момент мутации.
+  // Старое берётся из самой ранней записи, новое — из живого DOM.
+  function buildDiff() {
+    const attrs = new Map();
+    const texts = new Map();
+    const removed = [];
+    const added = [];
+
+    for (const r of recs) {
+      if (r.byModel) continue;
+      if (r.type === 'attributes') {
+        if (!attrs.has(r.target)) attrs.set(r.target, new Map());
+        const m = attrs.get(r.target);
+        if (!m.has(r.attributeName)) m.set(r.attributeName, r.oldValue);
+      } else if (r.type === 'characterData') {
+        if (!texts.has(r.target)) texts.set(r.target, r.oldValue);
+      } else {
+        for (const n of r.removed) removed.push({ node: n, parent: r.target });
+        for (const n of r.added) added.push({ node: n, parent: r.target });
+      }
+    }
+
+    const addedNodes = new Set(added.map(a => a.node));
+    const lines = [];
+
+    for (const el of dirty) {
+      const was = baseline.has(el) ? baseline.get(el) : '';
+      if (el.value === was) continue;
+      lines.push(path(el) + '  ' + JSON.stringify(was) + ' -> ' + JSON.stringify(el.value));
+    }
+    for (const [node, m] of attrs) {
+      if (!node.isConnected) continue;
+      for (const [attr, old] of m) {
+        const now = node.getAttribute(attr);
+        if (old === now) continue;
+        lines.push(path(node) + '  @' + attr + ': ' + JSON.stringify(old) + ' -> ' + JSON.stringify(now));
+      }
+    }
+    for (const [node, old] of texts) {
+      if (!node.isConnected || node.data === old) continue;
+      lines.push(path(node) + '  текст: ' + JSON.stringify(old) + ' -> ' + JSON.stringify(node.data));
+    }
+    for (const item of removed) {
+      if (item.node.isConnected || addedNodes.has(item.node)) continue;
+      lines.push('удалён из ' + path(item.parent) + ': ' + serialize(item.node));
+    }
+    for (const item of added) {
+      if (!item.node.isConnected) continue;
+      lines.push('добавлен в ' + path(item.parent) + ': ' + serialize(item.node));
+    }
+
+    clear();
+    return lines.join('\n');
+  }
 
   async function handle(m) {
     if (!m || typeof m.type !== 'string') return;
