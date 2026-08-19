@@ -105,10 +105,13 @@ git init && git add PLAN.md docs && git commit -m "chore: спецификаци
   "engines": { "node": ">=20" },
   "scripts": {
     "start": "node server/index.js",
-    "test": "node --test test/"
+    "test": "node --test"
   }
 }
 ```
+
+Без пути-директории намеренно: на Node 26.5.0 `node --test test/` пытается
+разрешить директорию как модуль и падает. Автопоиск находит те же файлы.
 
 - [ ] **Step 3: Создать `.gitignore`**
 
@@ -296,7 +299,7 @@ export function toModel(provider, spec) {
     baseUrl: provider.baseUrl,
     reasoning: merged.reasoning ?? false,
     input: merged.input ?? ['text'],
-    cost: merged.cost ?? { ...ZERO_COST },
+    cost: { ...ZERO_COST, ...merged.cost },
     contextWindow: merged.contextWindow ?? 32768,
     maxTokens: merged.maxTokens ?? 4096,
     compat: { ...provider.compat, ...(merged.compat ?? {}) },
@@ -321,11 +324,22 @@ export function flattenModels(raw, { env = process.env } = {}) {
       notes.push(`провайдер ${name}: api "${p.api}" не поддержан, модели пропущены`);
       continue;
     }
-    for (const spec of p.models ?? []) models.push(toModel(provider, spec));
+    for (const spec of Array.isArray(p.models) ? p.models : []) {
+      if (typeof spec.id !== 'string' || spec.id === '') {
+        notes.push(`провайдер ${name}: модель без id пропущена`);
+        continue;
+      }
+      models.push(toModel(provider, spec));
+    }
   }
   return { providers, models, notes };
 }
 ```
+
+`Array.isArray` вместо `?? []` намеренно: `"models": {}` в правленом руками
+конфиге иначе роняет разбор целиком, хотя строкой выше не-массив уже признан
+штатным случаем. `cost` мержится поверх нулей, иначе частично заданная цена
+даёт `NaN` при расчёте.
 
 - [ ] **Step 5: Запустить тесты**
 
@@ -473,6 +487,16 @@ export function scrub(text, secrets) {
 }
 ```
 
+> **Реализованный код отличается от этого блока — смотрите `server/pi-config.js`.**
+> Ревью качества нашло в написанном выше пять дефектов, все исправлены:
+> `discoverModels` возвращает `{models, notes}` и валидирует каждый элемент
+> ответа; `baseUrl` убран из текста ошибки, иначе он уходил в браузер
+> заметкой в обход `publicModels` и ломал приёмку §12 п.5; порог длины
+> секрета убран из `scrub` и оставлен только в сборе кандидатов, иначе ключ
+> короче 8 символов попадал в множество и гарантированно не вычищался;
+> секреты сортируются по убыванию длины; битый `auth.json` даёт заметку,
+> а не молчит. Ниже оставлено как история решения.
+
 - [ ] **Step 4: Запустить тесты**
 
 Run: `npm test`
@@ -531,6 +555,9 @@ test('GET /api/models отдаёт только provider, id и contextWindow', 
     assert.deepEqual(Object.keys(body.models[0]).sort(), ['contextWindow', 'id', 'provider']);
     assert.equal(JSON.stringify(body).includes('очень-секретный-ключ'), false);
     assert.equal(JSON.stringify(body).includes('api.deepseek.com'), false);
+    // Приёмка §12 п.5: baseUrl не должен уходить в браузер ни одним каналом,
+    // включая заметки о недоступных провайдерах.
+    assert.equal(body.notes.some(n => n.includes('http')), false);
   });
 });
 
@@ -561,9 +588,20 @@ import { createServer } from 'node:http';
 import { readFile } from 'node:fs/promises';
 import { join, normalize } from 'node:path';
 import { fileURLToPath } from 'node:url';
-import { loadConfig, publicModels } from './pi-config.js';
+import { loadConfig, publicModels, scrub } from './pi-config.js';
 
 const WEB = fileURLToPath(new URL('../web/', import.meta.url));
+
+// Заметки — второй канал наружу помимо моделей, и он не проходит через
+// allow-list publicModels. Чистим его на выходе: одного намерения
+// «не класть в заметку лишнего» мало, заметки пишутся в разных местах.
+function publicView(c) {
+  return {
+    models: publicModels(c.models),
+    notes: c.notes.map(n => scrub(n, c.secrets)),
+    error: c.error ? scrub(c.error, c.secrets) : null,
+  };
+}
 
 const MIME = {
   '.html': 'text/html; charset=utf-8',
@@ -611,11 +649,10 @@ export function createApp(opts = {}) {
     try {
       if (url.pathname === '/api/models') {
         const c = state.config ?? await reload();
-        return json(res, 200, { models: publicModels(c.models), notes: c.notes, error: c.error });
+        return json(res, 200, publicView(c));
       }
       if (url.pathname === '/api/reload' && req.method === 'POST') {
-        const c = await reload();
-        return json(res, 200, { models: publicModels(c.models), notes: c.notes, error: c.error });
+        return json(res, 200, publicView(await reload()));
       }
       if (url.pathname.startsWith('/api/')) return json(res, 404, { error: 'нет такого метода' });
       return await serveStatic(res, url.pathname);
