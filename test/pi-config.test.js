@@ -1,7 +1,7 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { readFile, mkdtemp, writeFile, rm } from 'node:fs/promises';
-import { expandVars, flattenModels, toModel, discoverModels, loadConfig, publicModels, scrub } from '../server/pi-config.js';
+import { expandVars, flattenModels, toModel, discoverModels, loadConfig, publicModels, publicView, scrub } from '../server/pi-config.js';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { fileURLToPath } from 'node:url';
@@ -197,6 +197,74 @@ test('заметка о неудачном discovery не содержит baseU
   const note = res.notes.find(n => n.includes('ollama'));
   assert.ok(note);
   assert.ok(!note.includes('http'));
+});
+
+// Task 3 закрыл только ветку !res.ok ("ответил 401") — сообщение там пишет
+// discoverModels сама и явно без baseUrl. Но когда fetchImpl бросает САМ (сеть,
+// или — как здесь — undici при разборе URL без схемы), в notes.push(...— ${e.message})
+// попадает чужой текст, и его содержимое мы не контролируем. baseUrl должен быть
+// вычищен структурно, через secrets, а не за счёт дисциплины в текстах ошибок.
+test('провайдер с baseUrl без схемы: настоящая (не подставная) ошибка парсинга URL не протекает в заметку после scrub', async () => {
+  const dir = await mkdtemp(join(tmpdir(), 'pi-config-'));
+  const modelsPath = join(dir, 'models.json');
+  await writeFile(modelsPath, JSON.stringify({
+    providers: {
+      deepseek: {
+        baseUrl: 'api.deepseek.com/v1', // опечатка в схеме — обычный случай для локального OpenAI-совместимого сервера
+        api: 'openai-completions',
+        apiKey: 'sk-live-secret-full',
+      },
+    },
+  }));
+  try {
+    // fetchImpl не переопределён — используется настоящий глобальный fetch.
+    // Разбор URL падает ДО сетевого обращения (схемы нет), так что тест
+    // офлайн-безопасен, но получает подлинное сообщение undici вида
+    // "Failed to parse URL from api.deepseek.com/v1/models" — с baseUrl внутри.
+    const res = await loadConfig({ path: modelsPath, authPath: '/no/such/auth.json', env: {} });
+    const note = res.notes.find(n => n.includes('список моделей не получен'));
+    assert.ok(note, 'должна быть заметка о падении discovery');
+    assert.ok(note.includes('deepseek.com'), 'сырая (нечищеная) заметка содержит baseUrl — так проявляется дефект');
+    const cleaned = scrub(note, res.secrets);
+    assert.equal(cleaned.includes('deepseek.com'), false);
+    assert.equal(cleaned.includes('sk-live-secret-full'), false);
+  } finally {
+    await rm(dir, { recursive: true, force: true });
+  }
+});
+
+test('loadConfig().secrets содержит baseUrl каждого провайдера, и scrub вычищает его из произвольного текста', async () => {
+  const fake = async () => { throw new Error('оффлайн'); };
+  const res = await loadConfig({
+    path: FIXTURE_MODELS_PATH,
+    authPath: '/no/such/auth.json',
+    env: { TEST_DS_KEY: 'секрет' },
+    fetchImpl: fake,
+  });
+  assert.ok(res.secrets.has('https://api.deepseek.com'));
+  assert.ok(res.secrets.has('http://localhost:11434/v1'));
+  const cleaned = scrub(
+    'ошибка при обращении к http://localhost:11434/v1/models и https://api.deepseek.com/models',
+    res.secrets,
+  );
+  assert.equal(cleaned.includes('localhost:11434'), false);
+  assert.equal(cleaned.includes('api.deepseek.com'), false);
+});
+
+test('publicView отдаёт models/notes/error, вычищенные от ключей и baseUrl', async () => {
+  const fake = async () => { throw new Error('оффлайн'); };
+  const cfg = await loadConfig({
+    path: FIXTURE_MODELS_PATH,
+    authPath: '/no/such/auth.json',
+    env: { TEST_DS_KEY: 'секрет-из-теста' },
+    fetchImpl: fake,
+  });
+  const view = publicView(cfg);
+  assert.deepEqual(Object.keys(view).sort(), ['error', 'models', 'notes']);
+  const json = JSON.stringify(view);
+  assert.equal(json.includes('секрет-из-теста'), false);
+  assert.equal(json.includes('api.deepseek.com'), false);
+  assert.equal(json.includes('localhost:11434'), false);
 });
 
 test('отсутствующий конфиг даёт пустой список и текст ошибки', async () => {

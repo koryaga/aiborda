@@ -134,15 +134,37 @@ export async function loadConfig({
     } catch (e) { notes.push(`провайдер ${p.name}: список моделей не получен — ${e.message}`); }
   }
 
+  // «secrets» — не только ключи, несмотря на имя (не переименовываем: на него
+  // уже завязаны другие задачи). Сюда же попадает baseUrl каждого провайдера:
+  // это второе, что не должно уйти в браузер, и полагаться на дисциплину
+  // авторов текста в пяти местах, где пишутся заметки, не вышло — Task 3 закрыл
+  // только ветку !res.ok, а когда fetchImpl бросает сам (сеть, битый URL без
+  // схемы), сообщение чужое и baseUrl в нём никак не подавлен. Через secrets
+  // scrub закрывает обе половины требования структурно, на выходе.
   const secrets = new Set();
   collectSecretCandidates(auth, secrets);
-  for (const p of providers) if (p.apiKey) secrets.add(p.apiKey);
+  for (const p of providers) {
+    if (p.apiKey) secrets.add(p.apiKey);
+    if (p.baseUrl) secrets.add(p.baseUrl);
+  }
 
   return { providers, models, notes, secrets, error: null };
 }
 
 export function publicModels(models) {
   return models.map(m => ({ provider: m.provider, id: m.id, contextWindow: m.contextWindow }));
+}
+
+// Единственная точка, где решается, что из конфига уходит наружу в браузер:
+// models — через allow-list publicModels, notes/error — через scrub тем же
+// набором secrets. Живёт здесь, а не в server/index.js, чтобы весь периметр
+// читался в одном файле рядом с тем, что в secrets кладётся.
+export function publicView(c) {
+  return {
+    models: publicModels(c.models),
+    notes: c.notes.map(n => scrub(n, c.secrets)),
+    error: c.error ? scrub(c.error, c.secrets) : null,
+  };
 }
 
 export function scrub(text, secrets) {
