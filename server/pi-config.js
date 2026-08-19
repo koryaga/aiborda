@@ -25,7 +25,7 @@ export function toModel(provider, spec) {
     baseUrl: provider.baseUrl,
     reasoning: merged.reasoning ?? false,
     input: merged.input ?? ['text'],
-    cost: merged.cost ?? { ...ZERO_COST },
+    cost: { ...ZERO_COST, ...merged.cost },
     contextWindow: merged.contextWindow ?? 32768,
     maxTokens: merged.maxTokens ?? 4096,
     compat: { ...provider.compat, ...(merged.compat ?? {}) },
@@ -50,7 +50,13 @@ export function flattenModels(raw, { env = process.env } = {}) {
       notes.push(`провайдер ${name}: api "${p.api}" не поддержан, модели пропущены`);
       continue;
     }
-    for (const spec of p.models ?? []) models.push(toModel(provider, spec));
+    for (const spec of Array.isArray(p.models) ? p.models : []) {
+      if (typeof spec.id !== 'string' || spec.id === '') {
+        notes.push(`провайдер ${name}: модель без id пропущена`);
+        continue;
+      }
+      models.push(toModel(provider, spec));
+    }
   }
   return { providers, models, notes };
 }

@@ -58,3 +58,57 @@ test('modelOverrides накладываются поверх модели', () =
   assert.equal(m.reasoning, true);
   assert.equal(m.contextWindow, 65536);
 });
+
+test('flattenModels не падает, если models не массив (например объект)', () => {
+  const broken = {
+    providers: {
+      broken: {
+        baseUrl: 'http://h',
+        api: 'openai-completions',
+        models: {},
+      },
+    },
+  };
+  const { providers, models } = flattenModels(broken, { env: {} });
+  const p = providers.find(p => p.name === 'broken');
+  assert.equal(p.dynamic, true);
+  assert.equal(models.some(m => m.provider === 'broken'), false);
+});
+
+test('toModel дополняет частичный cost нулями', () => {
+  const p = { name: 'x', baseUrl: 'http://h', api: 'openai-completions', compat: {}, overrides: {} };
+  const m = toModel(p, { id: 'a', cost: { input: 5 } });
+  assert.deepEqual(m.cost, { input: 5, output: 0, cacheRead: 0, cacheWrite: 0 });
+});
+
+test('модель без id пропускается с заметкой', () => {
+  const raw2 = {
+    providers: {
+      p1: {
+        baseUrl: 'http://h',
+        api: 'openai-completions',
+        models: [{ id: 'ok' }, {}],
+      },
+    },
+  };
+  const { models, notes } = flattenModels(raw2, { env: {} });
+  const p1models = models.filter(m => m.provider === 'p1');
+  assert.equal(p1models.length, 1);
+  assert.equal(p1models[0].id, 'ok');
+  assert.ok(notes.some(n => n.includes('p1') && n.includes('без id')));
+});
+
+test('cost не расшаривается между моделями одного провайдера', () => {
+  const raw3 = {
+    providers: {
+      p2: {
+        baseUrl: 'http://h',
+        api: 'openai-completions',
+        models: [{ id: 'a' }, { id: 'b' }],
+      },
+    },
+  };
+  const { models } = flattenModels(raw3, { env: {} });
+  const [a, b] = models.filter(m => m.provider === 'p2');
+  assert.notEqual(a.cost, b.cost);
+});
