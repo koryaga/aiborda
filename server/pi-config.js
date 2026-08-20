@@ -1,6 +1,7 @@
 import { readFile } from 'node:fs/promises';
 import { homedir } from 'node:os';
 import { join } from 'node:path';
+import { getBuiltinModels, builtinProviders } from '@earendil-works/pi-ai/providers/all';
 
 export const DEFAULT_MODELS_PATH = join(homedir(), '.pi', 'agent', 'models.json');
 export const DEFAULT_AUTH_PATH = join(homedir(), '.pi', 'agent', 'auth.json');
@@ -79,6 +80,42 @@ export async function discoverModels(provider, fetchImpl = globalThis.fetch) {
     models.push(toModel(provider, { id: d.id }));
   }
   return { models, notes };
+}
+
+// builtinProviders() строит все 39 провайдеров, поэтому зовём один раз.
+let builtinCache = null;
+function builtinById(id) {
+  if (!builtinCache) {
+    builtinCache = new Map();
+    for (const p of builtinProviders()) builtinCache.set(p.id, p);
+  }
+  return builtinCache.get(id) ?? null;
+}
+
+export function findBuiltinModel(provider, id) {
+  try {
+    return getBuiltinModels(provider).find(m => m.id === id) ?? null;
+  } catch {
+    return null; // провайдер не встроенный
+  }
+}
+
+export function builtinProviderRecord(id) {
+  const p = builtinById(id);
+  if (!p) return null;
+  return {
+    name: p.id,
+    baseUrl: p.baseUrl,
+    api: null,          // api задаётся моделью, а не провайдером
+    apiKey: '',
+    compat: {},
+    overrides: {},
+    supported: true,
+    dynamic: false,
+    builtin: true,
+    // Метод, а не ссылка: отвязанный от объекта stream потеряет this.
+    streamFn: (model, context, options) => p.stream(model, context, options),
+  };
 }
 
 async function readAuth(path) {

@@ -1,7 +1,7 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { readFile, mkdtemp, writeFile, rm } from 'node:fs/promises';
-import { expandVars, flattenModels, toModel, discoverModels, loadConfig, publicModels, publicView, scrub } from '../server/pi-config.js';
+import { expandVars, flattenModels, toModel, discoverModels, loadConfig, publicModels, publicView, scrub, findBuiltinModel, builtinProviderRecord } from '../server/pi-config.js';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { fileURLToPath } from 'node:url';
@@ -465,4 +465,53 @@ test('scrub маскирует пересекающиеся секреты по�
   const out = scrub('ключ sk-org-ABC-proj-Z в логах', secrets);
   assert.ok(!out.includes('sk-org-ABC-proj-Z'));
   assert.ok(!out.includes('-proj-Z'));
+});
+
+test('findBuiltinModel находит модель встроенного провайдера', () => {
+  const m = findBuiltinModel('openrouter', 'openrouter/free');
+  assert.ok(m, 'модель openrouter/free должна быть в пакете');
+  assert.equal(m.provider, 'openrouter');
+  assert.equal(m.api, 'openai-completions');
+  assert.equal(typeof m.contextWindow, 'number');
+  for (const k of ['id', 'name', 'api', 'provider', 'baseUrl', 'cost', 'maxTokens']) {
+    assert.ok(k in m, `нет поля ${k}`);
+  }
+});
+
+test('findBuiltinModel возвращает null для неизвестного провайдера и модели', () => {
+  assert.equal(findBuiltinModel('такого-нет', 'что-угодно'), null);
+  assert.equal(findBuiltinModel('openrouter', 'такой-модели-нет'), null);
+});
+
+test('builtinProviderRecord даёт запись провайдера с функцией потока', () => {
+  const p = builtinProviderRecord('openrouter');
+  assert.equal(p.name, 'openrouter');
+  assert.equal(p.builtin, true);
+  assert.equal(typeof p.streamFn, 'function');
+  assert.ok(p.baseUrl.startsWith('https://'));
+});
+
+test('builtinProviderRecord возвращает null для неизвестного', () => {
+  assert.equal(builtinProviderRecord('такого-нет'), null);
+});
+
+test('streamFn действительно зовёт поток провайдера и передаёт ключ', async () => {
+  const p = builtinProviderRecord('openrouter');
+  const model = findBuiltinModel('openrouter', 'openrouter/free');
+  let seen = null;
+  const fakeFetch = async (url, init) => {
+    seen = { url: String(url), headers: init?.headers };
+    return new Response('', { status: 401, headers: { 'content-type': 'application/json' } });
+  };
+  // Ключ — латиницей: OpenAI SDK кладёт apiKey в HTTP-заголовок Authorization,
+  // а заголовки — ByteString (WHATWG Fetch), кириллица там в принципе
+  // непредставима и роняет сборку клиента ДО вызова fetch — это ограничение
+  // протокола, не то, что тест проверяет. Настоящие API-ключи всегда ASCII.
+  const TEST_KEY = 'KLYUCH-DLYA-PROVERKI';
+  const events = p.streamFn(model, { systemPrompt: 'с', messages: [] },
+    { apiKey: TEST_KEY, fetch: fakeFetch, maxTokens: 16 });
+  try { for await (const _ of events) { /* до первой ошибки */ } } catch { /* 401 ожидаем */ }
+  assert.ok(seen, 'запрос должен был уйти в подставной fetch');
+  const auth = JSON.stringify(seen.headers instanceof Headers ? Object.fromEntries(seen.headers) : (seen.headers ?? {}));
+  assert.ok(auth.includes(TEST_KEY), 'ключ должен попасть в заголовки: ' + auth);
 });
