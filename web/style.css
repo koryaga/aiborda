@@ -10,4 +10,4 @@ main { display: flex; flex-direction: column; height: 100vh; }
 @media (max-width: 900px) { #bar { flex-wrap: wrap; } }
 @media (prefers-reduced-motion: reduce) { * { transition: none !important; } }
 
-#model { opacity: .6; font-size: 12px; }
+#model { margin-left: auto; opacity: .6; font-size: 12px; }
