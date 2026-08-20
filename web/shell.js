@@ -58,6 +58,12 @@ async function loadModels() {
     o.textContent = m.provider + ' / ' + m.id;
     modelSel.append(o);
   }
+  // Умолчание из настроек pi. Если такой модели нет в отобранном списке —
+  // остаётся первая, как было.
+  if (r.default) {
+    const want = r.default.provider + ' ' + r.default.id;
+    if ([...modelSel.options].some(o => o.value === want)) modelSel.value = want;
+  }
   if (r.error) say(r.error);
   else if (r.notes?.length) say(r.notes.join('\n'));
 }
