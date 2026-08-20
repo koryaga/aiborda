@@ -108,6 +108,12 @@ async function readStream(res, onDelta) {
 }
 
 async function commit() {
+  // Горячая клавиша не знает про disabled кнопки — без этой проверки
+  // Cmd/Ctrl+Enter во время уже идущего хода запускает второй commit()
+  // поверх первого: оба читают/пишут один и тот же lastResult и общую
+  // историю сервера, и как раз тот инвариант "результат уезжает ровно
+  // один раз", который мы защищаем, ломается гонкой.
+  if (sendBtn.disabled) return;
   if (!modelSel.value) { say('нет доступных моделей — проверьте models.json'); return; }
   sendBtn.disabled = true;
   try {
