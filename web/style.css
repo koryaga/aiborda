@@ -11,3 +11,24 @@ main { display: flex; flex-direction: column; height: 100vh; }
 @media (prefers-reduced-motion: reduce) { * { transition: none !important; } }
 
 #model { margin-left: auto; opacity: .6; font-size: 12px; }
+
+/* Индикатор хода: кружок вместо текста. Три состояния — свободна, идёт, ошибка. */
+#dot {
+  width: 12px; height: 12px; border-radius: 50%;
+  display: inline-block; flex: none; box-sizing: border-box;
+}
+#dot[data-state="idle"]  { background: #8886; }
+#dot[data-state="error"] { background: #c33; }
+#dot[data-state="busy"]  {
+  background: none;
+  border: 2px solid #8884;
+  border-top-color: Highlight;
+  animation: dot-spin .8s linear infinite;
+}
+@keyframes dot-spin { to { transform: rotate(360deg); } }
+
+/* Общее правило про reduced-motion гасит только transition, анимации — нет,
+   поэтому вращение выключаем отдельно и заменяем статичной заливкой. */
+@media (prefers-reduced-motion: reduce) {
+  #dot[data-state="busy"] { animation: none; border: 0; background: Highlight; }
+}

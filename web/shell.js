@@ -9,7 +9,13 @@ const pending = new Map();
 let imageAllowedOrigin = null;
 
 const say = t => { log.textContent = t; };
-const setState = s => { dot.textContent = s; };
+// Три состояния вместо сырых имён событий сессии: человеку нужен факт
+// «идёт / не идёт», а не turn_start и message_update.
+const STATES = { idle: 'свободна', busy: 'идёт ход', error: 'ошибка' };
+const setState = s => {
+  dot.dataset.state = s;
+  dot.setAttribute('aria-label', STATES[s] ?? s);
+};
 
 // event.source — это конкретный window, который прислал сообщение; код
 // модели способен сам вызвать parent.postMessage и подсунуть незапрошенный
@@ -21,7 +27,7 @@ addEventListener('message', e => {
   if (imageAllowedOrigin && e.origin !== imageAllowedOrigin) return;
   const m = e.data;
   if (!m || typeof m !== 'object') return;
-  if (m.type === 'ready') { setState('свободна'); return; }
+  if (m.type === 'ready') { setState('idle'); return; }
   // Человек нажал Ctrl/Cmd+Enter внутри образа. Образ фильтрует синтетические
   // события, но подделать это сообщение напрямую код модели всё же может —
   // ущерб ограничен: во время хода commit() выходит сразу, а диф будет пуст.
@@ -74,9 +80,12 @@ function listen() {
       body: JSON.stringify(out),
     });
   });
-  es.addEventListener('agent', e => { setState(JSON.parse(e.data).type ?? 'думает'); });
+  es.addEventListener('agent', e => {
+    const t = JSON.parse(e.data).type;
+    setState(t === 'agent_settled' || t === 'agent_end' ? 'idle' : 'busy');
+  });
   es.addEventListener('model', e => { showModel(JSON.parse(e.data)); });
-  es.onerror = () => setState('связь потеряна');
+  es.onerror = () => setState('error');
 }
 
 // Кадры SSE разбираются вручную (EventSource не умеет POST). Три места,
@@ -131,8 +140,8 @@ async function commit() {
   if (sendBtn.disabled) return;
   sendBtn.disabled = true;
   try {
-    const { text: diff } = await ask({ type: 'diff' });
-    setState('думает');
+    const { text: diff } = await ask({ type: 'diff', clearInput: true });
+    setState('busy');
     const res = await fetch('api/commit', {
       method: 'POST',
       headers: { 'content-type': 'application/json' },
@@ -142,10 +151,10 @@ async function commit() {
     // page_exec посреди хода через постоянный канал listen(). Здесь просто
     // дожидаемся конца потока (done/error).
     await readStream(res, () => {});
-    setState('свободна');
+    setState('idle');
   } catch (e) {
     say(String(e.message));
-    setState('ошибка');
+    setState('error');
   } finally {
     sendBtn.disabled = false;
   }

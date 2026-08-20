@@ -440,3 +440,73 @@ test('пробельный узел внутри добавленного под
   assert.equal(d.split('\n').length, 1, 'одно добавление, а не три: ' + d);
   assert.ok(d.startsWith('добавлен в #items'));
 });
+
+test('clearInput очищает поле после сборки дифа', async () => {
+  const { doc, img, dom } = makeImage('<input id="q" type="text">');
+  const q = doc.querySelector('#q');
+  q.dispatchEvent(new dom.window.Event('focusin', { bubbles: true }));
+  q.value = 'отправляемое';
+  q.dispatchEvent(new dom.window.Event('input', { bubbles: true }));
+  await tick();
+
+  await img.handle({ type: 'diff', id: 1, clearInput: true });
+  assert.equal(q.value, '', 'поле должно опустеть');
+});
+
+test('очистка не попадает в следующий диф', async () => {
+  const { doc, img, dom } = makeImage('<input id="q" type="text">');
+  const q = doc.querySelector('#q');
+  q.dispatchEvent(new dom.window.Event('focusin', { bubbles: true }));
+  q.value = 'первое';
+  q.dispatchEvent(new dom.window.Event('input', { bubbles: true }));
+  await tick();
+  await img.handle({ type: 'diff', id: 1, clearInput: true });
+  await tick();
+  assert.equal(img.buildDiff(), '', 'программная очистка — не правка человека');
+});
+
+test('после очистки baseline пуст: следующий ввод сравнивается с пустотой', async () => {
+  const { doc, img, dom, sent } = makeImage('<input id="q" type="text">');
+  const q = doc.querySelector('#q');
+  q.dispatchEvent(new dom.window.Event('focusin', { bubbles: true }));
+  q.value = 'первое';
+  q.dispatchEvent(new dom.window.Event('input', { bubbles: true }));
+  await tick();
+  await img.handle({ type: 'diff', id: 1, clearInput: true });
+
+  // фокус из поля не уходил, повторного focusin не будет
+  q.value = 'второе';
+  q.dispatchEvent(new dom.window.Event('input', { bubbles: true }));
+  await tick();
+  assert.equal(img.buildDiff(), '#q  "" -> "второе"',
+    'было должно быть пустым, а не «первое»');
+});
+
+test('без clearInput поле не трогается', async () => {
+  const { doc, img, dom } = makeImage('<input id="q" type="text">');
+  const q = doc.querySelector('#q');
+  q.dispatchEvent(new dom.window.Event('focusin', { bubbles: true }));
+  q.value = 'остаётся';
+  q.dispatchEvent(new dom.window.Event('input', { bubbles: true }));
+  await tick();
+  await img.handle({ type: 'diff', id: 1 });
+  assert.equal(q.value, 'остаётся');
+});
+
+test('clearInput без поля #q не роняет образ', async () => {
+  const { img } = makeImage('<div id="out"></div>');
+  await img.handle({ type: 'diff', id: 1, clearInput: true });
+  assert.ok(true);
+});
+
+test('диф собран до очистки, отправленный текст в нём есть', async () => {
+  const { doc, img, dom, sent } = makeImage('<input id="q" type="text">');
+  const q = doc.querySelector('#q');
+  q.dispatchEvent(new dom.window.Event('focusin', { bubbles: true }));
+  q.value = 'важный запрос';
+  q.dispatchEvent(new dom.window.Event('input', { bubbles: true }));
+  await tick();
+  await img.handle({ type: 'diff', id: 7, clearInput: true });
+  const msg = sent.find(m => m.type === 'diff' && m.id === 7);
+  assert.ok(msg.text.includes('важный запрос'), 'диф не должен потерять текст: ' + msg.text);
+});

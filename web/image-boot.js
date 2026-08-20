@@ -101,6 +101,21 @@ function createImage(doc, send, opts) {
     return undefined;
   }
 
+  // Очистка поля ввода после отправки. Живёт здесь, а не в оболочке, чтобы быть
+  // атомарной со сборкой дифа: будь это отдельным сообщением, человек успел бы
+  // набрать в промежутке, и мы стёрли бы набранное.
+  // baseline пересевается пустым значением — иначе следующий диф сказал бы
+  // «было <только что отправленное>», хотя поле уже пустое: focusin повторно
+  // не придёт, фокус же из поля не уходил.
+  function clearInput() {
+    const el = doc.getElementById('q');
+    if (!el || !('value' in el)) return;
+    el.value = '';
+    const state = fieldState(el);
+    if (state !== undefined) baseline.set(el, state);
+    dirty.delete(el);
+  }
+
   function clear() {
     recs.length = 0;
     baseline.clear();
@@ -265,7 +280,9 @@ function createImage(doc, send, opts) {
       const r = await exec(m.code);
       send({ type: 'result', id: m.id, ok: r.ok, value: r.value, error: r.error });
     } else if (m.type === 'diff') {
-      send({ type: 'diff', id: m.id, text: buildDiff() });
+      const text = buildDiff();
+      if (m.clearInput) clearInput();
+      send({ type: 'diff', id: m.id, text });
     } else if (m.type === 'snap') {
       send({ type: 'snap', id: m.id, html: snapshot() });
     }
