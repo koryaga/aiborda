@@ -7,26 +7,12 @@ import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { createApp } from '../server/index.js';
 
-const FIXTURE = fileURLToPath(new URL('./fixtures/models.json', import.meta.url));
 const PACKAGE_JSON_NEEDLE = '"name": "dom-agent"';
 
 async function withServer(opts, fn) {
   const app = createApp(opts);
   await app.listen(0, 0);
   try { await fn(`http://127.0.0.1:${app.port}`, app); } finally { await app.close(); }
-}
-
-// Путь вроде /no/models.json полагается на то, что корень примонтирован
-// только для чтения — верно на macOS, не гарантировано под root в Linux CI.
-// Файл внутри свежего tmpdir() гарантированно не существует независимо от
-// платформы и прав процесса, поэтому именно так моделируем "конфига нет".
-async function withMissingConfig(fn) {
-  const dir = await mkdtemp(join(tmpdir(), 'dom-agent-missing-'));
-  try {
-    await fn({ configPath: join(dir, 'models.json'), authPath: join(dir, 'auth.json'), env: {} });
-  } finally {
-    await rm(dir, { recursive: true, force: true });
-  }
 }
 
 // Пишет HTTP-запрос напрямую в сокет, минуя WHATWG URL-парсинг, который делает
@@ -55,138 +41,49 @@ function rawRequest(port, target, { host } = {}) {
   });
 }
 
-test('GET /api/models отдаёт только provider, id и contextWindow', async () => {
-  await withServer({
-    configPath: FIXTURE,
-    authPath: '/no/auth.json',
-    // Изолируем от настоящего ~/.pi/agent/settings.json разработчика: без этого
-    // enabledModels на реальной машине фильтрует список моделей теста и делает
-    // его недетерминированным между машинами.
-    settingsPath: '/no/settings.json',
-    env: { TEST_DS_KEY: 'очень-секретный-ключ' },
-    fetchImpl: async () => { throw new Error('оффлайн'); },
-  }, async base => {
-    const res = await fetch(base + '/api/models');
-    const body = await res.json();
-    assert.equal(res.status, 200);
-    assert.ok(body.models.length > 0);
-    assert.deepEqual(Object.keys(body.models[0]).sort(), ['contextWindow', 'id', 'provider']);
-    assert.equal(JSON.stringify(body).includes('очень-секретный-ключ'), false);
-    assert.equal(JSON.stringify(body).includes('api.deepseek.com'), false);
-    // Приёмка §12 п.5: baseUrl не должен уходить в браузер ни одним каналом,
-    // включая заметки о недоступных провайдерах.
-    assert.equal(body.notes.some(n => n.includes('http')), false);
-  });
-});
-
-test('GET /api/models при отсутствии конфига отдаёт текст ошибки и живой сервер', async () => {
-  await withMissingConfig(async opts => {
-    await withServer(opts, async base => {
-      const body = await (await fetch(base + '/api/models')).json();
-      assert.deepEqual(body.models, []);
-      assert.ok(body.error.includes('--pi-config'));
-    });
-  });
-});
-
-test('POST /api/reload перечитывает конфиг и отдаёт тот же публичный вид', async () => {
-  const dir = await mkdtemp(join(tmpdir(), 'dom-agent-reload-'));
-  const configPath = join(dir, 'models.json');
-  const authPath = join(dir, 'auth.json'); // не создаём — readAuth() должен молча стерпеть отсутствие
-  const cfgV1 = {
-    providers: { p: {
-      baseUrl: 'https://example.invalid', api: 'anthropic-messages', apiKey: 'ключ-раз',
-      models: [{ id: 'reload-m1', contextWindow: 1000 }],
-    } },
-  };
-  await writeFile(configPath, JSON.stringify(cfgV1));
-  try {
-    // settingsPath — заведомо не существующий путь внутри того же tmpdir:
-    // без изоляции реальный ~/.pi/agent/settings.json разработчика (если он
-    // есть) отфильтровал бы reload-m1/reload-m2 через enabledModels.
-    await withServer({ configPath, authPath, settingsPath: join(dir, 'settings.json'), env: {} }, async base => {
-      const before = await (await fetch(base + '/api/models')).json();
-      assert.deepEqual(before.models.map(m => m.id), ['reload-m1']);
-
-      // Меняем конфиг на диске между запросами — без реального перечитывания
-      // сервер продолжил бы отдавать закэшированный ответ.
-      const cfgV2 = {
-        providers: { p: {
-          baseUrl: 'https://example.invalid', api: 'anthropic-messages', apiKey: 'ключ-два',
-          models: [{ id: 'reload-m1', contextWindow: 1000 }, { id: 'reload-m2', contextWindow: 2000 }],
-        } },
-      };
-      await writeFile(configPath, JSON.stringify(cfgV2));
-
-      const reloadRes = await fetch(base + '/api/reload', { method: 'POST' });
-      const reloaded = await reloadRes.json();
-      assert.equal(reloadRes.status, 200);
-      assert.deepEqual(reloaded.models.map(m => m.id).sort(), ['reload-m1', 'reload-m2']);
-      assert.deepEqual(Object.keys(reloaded).sort(), ['default', 'error', 'models', 'notes']);
-      // Ключи из cfgV2 не должны утечь ни в одном канале.
-      assert.equal(JSON.stringify(reloaded).includes('ключ-два'), false);
-
-      // Публичный вид из /api/reload и последующего /api/models должен совпасть —
-      // значит перечитанный конфиг реально осел в состоянии сервера, а не был
-      // возвращён разово и тут же отброшен.
-      const after = await (await fetch(base + '/api/models')).json();
-      assert.deepEqual(after, reloaded);
-    });
-  } finally {
-    await rm(dir, { recursive: true, force: true });
-  }
-});
-
 test('запрос с чужим Host отклоняется 403, с правильным (127.0.0.1 или localhost) — проходит', async () => {
   // Петля — не граница. Домен атакующего, резолвящийся в 127.0.0.1, заставляет
   // браузер жертвы слать сюда запросы с чужим Host — это и DNS rebinding, и
   // межсайтовый POST (CORS запрещает читать ответ, а не отправлять запрос;
   // preflight простой POST не требует). Ответ должен зависеть от Host.
-  await withMissingConfig(async opts => {
-    await withServer(opts, async (base, app) => {
-      const bad = await rawRequest(app.port, '/api/models', { host: 'evil.example:80' });
-      assert.equal(bad.status, 403);
-      assert.equal(bad.body.includes('--pi-config'), false, 'при 403 тело не должно нести полезную нагрузку API');
+  await withServer({}, async (base, app) => {
+    const bad = await rawRequest(app.port, '/api/config', { host: 'evil.example:80' });
+    assert.equal(bad.status, 403);
 
-      const goodIp = await rawRequest(app.port, '/api/models', { host: `127.0.0.1:${app.port}` });
-      assert.equal(goodIp.status, 200);
+    const goodIp = await rawRequest(app.port, '/api/config', { host: `127.0.0.1:${app.port}` });
+    assert.equal(goodIp.status, 200);
 
-      const goodLocalhost = await rawRequest(app.port, '/api/models', { host: `localhost:${app.port}` });
-      assert.equal(goodLocalhost.status, 200);
-    });
+    const goodLocalhost = await rawRequest(app.port, '/api/config', { host: `localhost:${app.port}` });
+    assert.equal(goodLocalhost.status, 200);
   });
 });
 
 test('второй listen() на занятый порт отклоняется, не роняя процесс', async () => {
-  await withMissingConfig(async opts => {
-    const app1 = createApp(opts);
-    const app2 = createApp(opts);
-    try {
-      await app1.listen(0, 0);
-      // imgPort у app2 — тоже 0 (а не занятый app1.imagePort и не дефолтный
-      // 8731): иначе успешный bind второго порта app2 остался бы висеть
-      // непойманным сокетом до конца прогона тестов — assert.rejects ловит
-      // отказ Promise.all по первому упавшему промису, но не отменяет и не
-      // закрывает уже поднявшийся сосед.
-      await assert.rejects(() => app2.listen(app1.port, 0), e => e.code === 'EADDRINUSE');
-      // До фикса необработанное 'error'-событие на сервере убивало весь процесс
-      // node --test (а не только эту проверку) — здесь просто убеждаемся, что
-      // app1 как ни в чём не бывало продолжает отвечать.
-      const res = await fetch(`http://127.0.0.1:${app1.port}/api/models`);
-      assert.equal(res.status, 200);
-    } finally {
-      await app2.close();
-      await app1.close();
-    }
-  });
+  const app1 = createApp({});
+  const app2 = createApp({});
+  try {
+    await app1.listen(0, 0);
+    // imgPort у app2 — тоже 0 (а не занятый app1.imagePort и не дефолтный
+    // 8731): иначе успешный bind второго порта app2 остался бы висеть
+    // непойманным сокетом до конца прогона тестов — assert.rejects ловит
+    // отказ Promise.all по первому упавшему промису, но не отменяет и не
+    // закрывает уже поднявшийся сосед.
+    await assert.rejects(() => app2.listen(app1.port, 0), e => e.code === 'EADDRINUSE');
+    // До фикса необработанное 'error'-событие на сервере убивало весь процесс
+    // node --test (а не только эту проверку) — здесь просто убеждаемся, что
+    // app1 как ни в чём не бывало продолжает отвечать.
+    const res = await fetch(`http://127.0.0.1:${app1.port}/api/config`);
+    assert.equal(res.status, 200);
+  } finally {
+    await app2.close();
+    await app1.close();
+  }
 });
 
 test('GET // с некорректным путём получает 400 (ветка была живой, но не покрытой)', async () => {
-  await withMissingConfig(async opts => {
-    await withServer(opts, async (base, app) => {
-      const { status } = await rawRequest(app.port, '//');
-      assert.equal(status, 400);
-    });
+  await withServer({}, async (base, app) => {
+    const { status } = await rawRequest(app.port, '//');
+    assert.equal(status, 400);
   });
 });
 
@@ -199,8 +96,7 @@ test('serveStatic: .html/.css с правильным content-type, / отдаё
     await writeFile(join(webRoot, 'noext'), binBody);
     await writeFile(join(webRoot, 'файл.html'), '<p>кириллица в имени файла</p>', 'utf8');
 
-    // configPath/authPath здесь не читаются вообще: тест не трогает /api/*.
-    await withServer({ configPath: '/unused', authPath: '/unused', env: {}, webRoot }, async base => {
+    await withServer({ webRoot }, async base => {
       const idx = await fetch(base + '/');
       assert.equal(idx.status, 200);
       assert.match(idx.headers.get('content-type'), /text\/html/);
@@ -510,51 +406,38 @@ test('выход за пределы web/ запрещён: обходы чер�
   const real = await readFile(fileURLToPath(new URL('../package.json', import.meta.url)), 'utf8');
   assert.ok(real.includes(PACKAGE_JSON_NEEDLE), 'сверочная строка должна быть в реальном package.json');
 
-  await withMissingConfig(async opts => {
-    await withServer(opts, async (base, app) => {
-      const probes = [
-        '/../package.json',              // буквальный ".." — new URL() клэмпит его к корню ещё при разборе pathname
-        '/%2e%2e/package.json',          // процентное кодирование точек — WHATWG URL распознаёт %2e как "." при поиске dot-сегментов
-        '/%2e%2e%2fpackage.json',        // точки и слэш закодированы вместе — один сегмент на входе, после decodeURIComponent превращается в "/../package.json" и клэмпится normalize()
-        '/..%2fpackage.json',            // точки буквальные, слэш закодирован (%2f) — decodeURIComponent даёт настоящий "../", но pathname всегда абсолютный: normalize() клэмпит "../" к корню, а не выпускает выше него
-        '/..%2Fpackage.json',            // то же в верхнем регистре
-        '/..\\package.json',             // обратный слэш — для http-схемы WHATWG URL приравнивает его к "/" ещё на этапе разбора, дальше как обычный ".."
-        '/..%5cpackage.json',            // обратный слэш закодирован (нижний регистр) — после decode это буквальный символ "\" внутри имени файла (не разделитель на POSIX), ищется как один опознаваемый файл и не находится
-        '/..%5Cpackage.json',            // то же в верхнем регистре
-        '/foo/%2e%2e/%2e%2e/package.json', // вложенный обход из подкаталога
-        '/./../package.json',            // смешанные сегменты
-        '/etc/passwd',                   // абсолютный путь без обхода — ловит баг join() vs resolve()
-        '//etc/passwd',                  // "//" — WHATWG URL читает как protocol-relative: "etc" становится (фиктивным) host'ом при разборе, pathname схлопывается до "/passwd" — до логики обхода в serveStatic в привычном виде вообще не доходит
-        '/package.json%00.html',         // нулевой байт после реального имени — decodeURIComponent даёт литеральный \0 в имени, fs.readFile на таком пути бросает, ловится как 404
-        '/%00package.json',              // нулевой байт в начале имени
-        '/index.html%00',                // нулевой байт в конце
-      ];
+  await withServer({}, async (base, app) => {
+    const probes = [
+      '/../package.json',              // буквальный ".." — new URL() клэмпит его к корню ещё при разборе pathname
+      '/%2e%2e/package.json',          // процентное кодирование точек — WHATWG URL распознаёт %2e как "." при поиске dot-сегментов
+      '/%2e%2e%2fpackage.json',        // точки и слэш закодированы вместе — один сегмент на входе, после decodeURIComponent превращается в "/../package.json" и клэмпится normalize()
+      '/..%2fpackage.json',            // точки буквальные, слэш закодирован (%2f) — decodeURIComponent даёт настоящий "../", но pathname всегда абсолютный: normalize() клэмпит "../" к корню, а не выпускает выше него
+      '/..%2Fpackage.json',            // то же в верхнем регистре
+      '/..\\package.json',             // обратный слэш — для http-схемы WHATWG URL приравнивает его к "/" ещё на этапе разбора, дальше как обычный ".."
+      '/..%5cpackage.json',            // обратный слэш закодирован (нижний регистр) — после decode это буквальный символ "\" внутри имени файла (не разделитель на POSIX), ищется как один опознаваемый файл и не находится
+      '/..%5Cpackage.json',            // то же в верхнем регистре
+      '/foo/%2e%2e/%2e%2e/package.json', // вложенный обход из подкаталога
+      '/./../package.json',            // смешанные сегменты
+      '/etc/passwd',                   // абсолютный путь без обхода — ловит баг join() vs resolve()
+      '//etc/passwd',                  // "//" — WHATWG URL читает как protocol-relative: "etc" становится (фиктивным) host'ом при разборе, pathname схлопывается до "/passwd" — до логики обхода в serveStatic в привычном виде вообще не доходит
+      '/package.json%00.html',         // нулевой байт после реального имени — decodeURIComponent даёт литеральный \0 в имени, fs.readFile на таком пути бросает, ловится как 404
+      '/%00package.json',              // нулевой байт в начале имени
+      '/index.html%00',                // нулевой байт в конце
+    ];
 
-      for (const target of probes) {
-        const { status, body } = await rawRequest(app.port, target);
-        assert.notEqual(status, 200, `${target} не должен отдавать 200`);
-        assert.equal(status, 404, `${target} должен получить 404`);
-        assert.equal(body.includes(PACKAGE_JSON_NEEDLE), false, `${target} не должен отдать содержимое package.json`);
-      }
-    });
+    for (const target of probes) {
+      const { status, body } = await rawRequest(app.port, target);
+      assert.notEqual(status, 200, `${target} не должен отдавать 200`);
+      assert.equal(status, 404, `${target} должен получить 404`);
+      assert.equal(body.includes(PACKAGE_JSON_NEEDLE), false, `${target} не должен отдать содержимое package.json`);
+    }
   });
-});
-
-test('GET /api/models отдаёт умолчание', async () => {
-  const app = createApp({ configPath: '/нет', authPath: '/нет', settingsPath: '/нет' });
-  app.state.config = { models: [], providers: [], notes: [], secrets: new Set(),
-    error: null, default: { provider: 'deepseek', id: 'deepseek-v4-pro' } };
-  await app.listen(0, 0);
-  try {
-    const body = await (await fetch(`http://127.0.0.1:${app.port}/api/models`)).json();
-    assert.deepEqual(body.default, { provider: 'deepseek', id: 'deepseek-v4-pro' });
-  } finally { await app.close(); }
 });
 
 // --- Задача 3: образ на своём origin ---
 
 test('образ отдаётся со второго порта', async () => {
-  const app = createApp({ configPath: '/нет', authPath: '/нет', settingsPath: '/нет' });
+  const app = createApp({});
   await app.listen(0, 0);
   try {
     assert.notEqual(app.port, app.imagePort);
@@ -568,7 +451,7 @@ test('образ отдаётся со второго порта', async () => {
 });
 
 test('/api/config отдаёт origin образа', async () => {
-  const app = createApp({ configPath: '/нет', authPath: '/нет', settingsPath: '/нет' });
+  const app = createApp({});
   await app.listen(0, 0);
   try {
     const body = await (await fetch(`http://127.0.0.1:${app.port}/api/config`)).json();
@@ -582,7 +465,7 @@ test('порт образа проверяет Host так же, как обол
   // (проверено: с headers:{host:'evil.example'} на сервер всё равно приходит
   // 127.0.0.1:port). Ровно поэтому в проверке Host у оболочки уже используется
   // rawRequest — тот же приём нужен и здесь.
-  const app = createApp({ configPath: '/нет', authPath: '/нет', settingsPath: '/нет' });
+  const app = createApp({});
   await app.listen(0, 0);
   try {
     const bad = await rawRequest(app.imagePort, '/image.html', { host: 'evil.example' });
@@ -593,7 +476,7 @@ test('порт образа проверяет Host так же, как обол
 });
 
 test('image-boot.js отдаётся со второго порта', async () => {
-  const app = createApp({ configPath: '/нет', authPath: '/нет', settingsPath: '/нет' });
+  const app = createApp({});
   await app.listen(0, 0);
   try {
     const res = await fetch(`http://127.0.0.1:${app.imagePort}/image-boot.js`);
@@ -604,7 +487,7 @@ test('image-boot.js отдаётся со второго порта', async () =
 });
 
 test('на порту образа "/" отдаёт image.html с правильным content-type', async () => {
-  const app = createApp({ configPath: '/нет', authPath: '/нет', settingsPath: '/нет' });
+  const app = createApp({});
   await app.listen(0, 0);
   try {
     const res = await fetch(`http://127.0.0.1:${app.imagePort}/`);

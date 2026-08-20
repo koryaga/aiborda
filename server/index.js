@@ -2,11 +2,6 @@ import { createServer } from 'node:http';
 import { readFile } from 'node:fs/promises';
 import { join, normalize } from 'node:path';
 import { fileURLToPath } from 'node:url';
-import { loadConfig, publicView, scrub } from './pi-config.js';
-import { stream as openaiStream } from '@earendil-works/pi-ai/api/openai-completions';
-import { stream as anthropicStream } from '@earendil-works/pi-ai/api/anthropic-messages';
-import { extractCode, checkParsable } from './parse.js';
-import { createHistory, SYSTEM_PROMPT } from './context.js';
 import { createBridge } from './bridge.js';
 import { startSession } from './agent.js';
 
@@ -76,7 +71,7 @@ async function serveStatic(res, pathname, root) {
 }
 
 export function createApp(opts = {}) {
-  const state = { config: null, opts, history: createHistory(), abort: null, session: null };
+  const state = { opts, abort: null, session: null };
   const root = withTrailingSlash(opts.webRoot ?? DEFAULT_WEB_ROOT);
 
   const bridge = createBridge({ send: null });
@@ -98,41 +93,6 @@ export function createApp(opts = {}) {
     state.session = session;
     session.subscribe(ev => { if (ev?.type) broadcast('agent', { type: ev.type }); });
     return session;
-  }
-
-  async function reload() {
-    state.config = await loadConfig({
-      path: opts.configPath, authPath: opts.authPath, settingsPath: opts.settingsPath,
-      env: opts.env, fetchImpl: opts.fetchImpl,
-    });
-    return state.config;
-  }
-
-  // opts.streamFn — подмена на тестах: сама функция вызывается с той же
-  // сигнатурой (model, context, options), что и настоящие openaiStream/
-  // anthropicStream, поэтому здесь возвращается ссылка на функцию,
-  // а не результат её вызова — вызовет её уже collect().
-  function pickStream(model, provider) {
-    if (opts.streamFn) return opts.streamFn;
-    // Встроенный провайдер несёт собственный поток, поэтому его api-тип
-    // (openai-responses, google-generative-ai, openai-codex-responses)
-    // не требует от нас адаптера.
-    if (provider?.streamFn) return provider.streamFn;
-    return model.api === 'anthropic-messages' ? anthropicStream : openaiStream;
-  }
-
-  async function collect(model, provider, signal, res) {
-    const events = pickStream(model, provider)(
-      model,
-      { systemPrompt: SYSTEM_PROMPT, messages: state.history.messages },
-      { apiKey: provider?.apiKey, signal, maxTokens: model.maxTokens },
-    );
-    let text = '';
-    for await (const ev of events) {
-      if (ev.type === 'text_delta') { text += ev.delta; sse(res, 'delta', { text: ev.delta }); }
-      else if (ev.type === 'error') throw new Error(ev.error?.errorMessage ?? 'провайдер вернул ошибку');
-    }
-    return text;
   }
 
   async function handleCommit(req, res) {
@@ -168,12 +128,11 @@ export function createApp(opts = {}) {
 
     // Петля — не граница. Домен атакующего, резолвящийся в 127.0.0.1 (DNS
     // rebinding), заставляет браузер жертвы слать сюда запросы с чужим Host —
-    // и это может быть чтение (списка моделей, текста ошибки с именем
-    // пользователя ОС в пути) или, начиная со следующей задачи, запись
-    // (/api/commit). Межсайтовый POST — simple request, preflight не нужен;
-    // CORS запрещает читать чужой ответ, а не отправлять запрос, так что
-    // отсутствие CORS-заголовков само по себе не защита. Отвечаем только
-    // тогда, когда клиент целился именно в этот адрес.
+    // и это может быть чтение (текста ошибки с именем пользователя ОС в пути)
+    // или запись (/api/commit). Межсайтовый POST — simple request, preflight
+    // не нужен; CORS запрещает читать чужой ответ, а не отправлять запрос,
+    // так что отсутствие CORS-заголовков само по себе не защита. Отвечаем
+    // только тогда, когда клиент целился именно в этот адрес.
     const port = server.address()?.port;
     const allowedHosts = new Set([`127.0.0.1:${port}`, `localhost:${port}`]);
     if (!allowedHosts.has(String(req.headers.host).toLowerCase())) {
@@ -181,18 +140,11 @@ export function createApp(opts = {}) {
     }
 
     try {
-      if (url.pathname === '/api/models') {
-        return json(res, 200, publicView(state.config ?? await reload()));
-      }
-      if (url.pathname === '/api/reload' && req.method === 'POST') {
-        return json(res, 200, publicView(await reload()));
-      }
       if (url.pathname === '/api/commit' && req.method === 'POST') return await handleCommit(req, res);
       if (url.pathname === '/api/abort' && req.method === 'POST') {
         if (state.session) await state.session.abort();
         return json(res, 200, { ok: true });
       }
-      if (url.pathname === '/api/session') return json(res, 200, { tokens: state.history.size() });
       if (url.pathname === '/api/config') {
         return json(res, 200, { imageOrigin: `http://127.0.0.1:${imageServer.address()?.port}` });
       }
@@ -231,12 +183,7 @@ export function createApp(opts = {}) {
       return await serveStatic(res, url.pathname, root);
     } catch (e) {
       if (res.headersSent) return res.destroy();
-      // Конфиг мог быть уже загружен — ключи и baseUrl лежат в state.config.secrets.
-      // Текст непредвиденной ошибки чистим тем же scrub, что и обычные каналы: это
-      // единственный выход из процесса мимо publicView, и он не должен быть дырой
-      // в инварианте «ключи и baseUrl не уходят в браузер» просто по недосмотру.
-      const message = state.config ? scrub(String(e.message), state.config.secrets) : String(e.message);
-      return json(res, 500, { error: message });
+      return json(res, 500, { error: String(e.message) });
     }
   });
 
@@ -262,7 +209,7 @@ export function createApp(opts = {}) {
   });
 
   return {
-    server, imageServer, reload, state,
+    server, imageServer, state,
     get port() { return server.address()?.port; },
     get imagePort() { return imageServer.address()?.port; },
     listen(port = 8730, imgPort = 8731) {
@@ -283,9 +230,7 @@ export function createApp(opts = {}) {
 }
 
 if (fileURLToPath(import.meta.url) === process.argv[1]) {
-  const flag = process.argv.indexOf('--pi-config');
-  const app = createApp({ configPath: flag > -1 ? process.argv[flag + 1] : process.env.PI_MODELS_PATH });
+  const app = createApp({});
   await app.listen(8730, 8731);
-  process.on('SIGHUP', () => { app.reload(); });
   console.log('dom-agent слушает http://127.0.0.1:8730, образ — http://127.0.0.1:8731');
 }

@@ -1,5 +1,4 @@
 const frame = document.getElementById('image');
-const modelSel = document.getElementById('model');
 const dot = document.getElementById('dot');
 const sendBtn = document.getElementById('send');
 const log = document.getElementById('log');
@@ -66,25 +65,6 @@ function listen() {
   });
   es.addEventListener('agent', e => { setState(JSON.parse(e.data).type ?? 'думает'); });
   es.onerror = () => setState('связь потеряна');
-}
-
-async function loadModels() {
-  const r = await fetch('api/models').then(r => r.json());
-  modelSel.replaceChildren();
-  for (const m of r.models) {
-    const o = document.createElement('option');
-    o.value = m.provider + ' ' + m.id;
-    o.textContent = m.provider + ' / ' + m.id;
-    modelSel.append(o);
-  }
-  // Умолчание из настроек pi. Если такой модели нет в отобранном списке —
-  // остаётся первая, как было.
-  if (r.default) {
-    const want = r.default.provider + ' ' + r.default.id;
-    if ([...modelSel.options].some(o => o.value === want)) modelSel.value = want;
-  }
-  if (r.error) say(r.error);
-  else if (r.notes?.length) say(r.notes.join('\n'));
 }
 
 // Кадры SSE разбираются вручную (EventSource не умеет POST). Три места,
@@ -166,4 +146,3 @@ addEventListener('keydown', e => {
 
 await boot();
 listen();
-await loadModels();
