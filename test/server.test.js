@@ -212,6 +212,223 @@ test('serveStatic: .html/.css с правильным content-type, / отдаё
   }
 });
 
+function fakeStream(events) {
+  return () => ({
+    async *[Symbol.asyncIterator]() { for (const e of events) yield e; },
+  });
+}
+
+// В отличие от fakeStream (одна и та же лента для любого числа вызовов),
+// эта фабрика различает попытки — нужна для проверки автоповтора: считает
+// вызовы и на каждый следующий отдаёт свою заготовленную ленту событий.
+function sequentialStream(replySets) {
+  const calls = [];
+  const fn = (model, context, options) => {
+    const events = replySets[calls.length] ?? replySets[replySets.length - 1];
+    calls.push({ model, context, options });
+    return { async *[Symbol.asyncIterator]() { for (const e of events) yield e; } };
+  };
+  fn.calls = calls;
+  return fn;
+}
+
+async function readSse(res) {
+  const out = [];
+  for (const frame of (await res.text()).split('\n\n')) {
+    if (!frame.trim()) continue;
+    const ev = {};
+    for (const line of frame.split('\n')) {
+      const i = line.indexOf(':');
+      ev[line.slice(0, i)] = line.slice(i + 1).trimStart();
+    }
+    out.push({ event: ev.event, data: JSON.parse(ev.data) });
+  }
+  return out;
+}
+
+const COMMIT_OPTS = {
+  configPath: FIXTURE,
+  authPath: '/no/auth.json',
+  env: { TEST_DS_KEY: 'k' },
+  fetchImpl: async () => { throw new Error('оффлайн'); },
+};
+
+const MODEL_REF = { provider: 'deepseek', id: 'deepseek-v4-flash' };
+
+function post(base, body) {
+  return fetch(base + '/api/commit', {
+    method: 'POST', headers: { 'content-type': 'application/json' },
+    body: JSON.stringify(body),
+  });
+}
+
+const BAD_TEXT = 'это не код, а просто текст';
+
+test('commit стримит дельты и отдаёт очищенный код, рассуждения не уходят', async () => {
+  await withServer({ ...COMMIT_OPTS, streamFn: fakeStream([
+    { type: 'thinking_delta', delta: 'сейчас подумаю' },
+    { type: 'text_delta', delta: '```js\ndocument' },
+    { type: 'text_delta', delta: '.title = "x"\n```' },
+    { type: 'done', reason: 'stop', message: {} },
+  ]) }, async base => {
+    const events = await readSse(await post(base, { model: MODEL_REF, diff: '#q  "" -> "привет"' }));
+    assert.equal(events.at(-1).event, 'done');
+    assert.equal(events.at(-1).data.code, 'document.title = "x"');
+    assert.equal(events.some(e => e.data.text === 'сейчас подумаю'), false);
+  });
+});
+
+test('commit кладёт результат прошлого хода перед дифом', async () => {
+  await withServer({ ...COMMIT_OPTS, streamFn: fakeStream([
+    { type: 'text_delta', delta: 'x()' },
+    { type: 'done', reason: 'stop', message: {} },
+  ]) }, async (base, app) => {
+    await post(base, { model: MODEL_REF, diff: 'диф', result: '42' }).then(r => r.text());
+    assert.deepEqual(app.state.history.messages.map(m => m.content),
+      ['результат: 42', 'диф', [{ type: 'text', text: 'x()' }]]);
+  });
+});
+
+test('пустой ответ модели — законный ход: done с пустым кодом', async () => {
+  await withServer({ ...COMMIT_OPTS, streamFn: fakeStream([
+    { type: 'text_delta', delta: '<think>делать нечего</think>' },
+    { type: 'done', reason: 'stop', message: {} },
+  ]) }, async base => {
+    const events = await readSse(await post(base, { model: MODEL_REF, diff: 'д' }));
+    assert.equal(events.at(-1).event, 'done');
+    assert.equal(events.at(-1).data.code, '');
+  });
+});
+
+test('неизвестная модель даёт 400', async () => {
+  await withServer(COMMIT_OPTS, async base => {
+    assert.equal((await post(base, { model: { provider: 'нет', id: 'нет' }, diff: '' })).status, 400);
+  });
+});
+
+test('ошибка провайдера уходит событием error и не роняет сервер', async () => {
+  await withServer({ ...COMMIT_OPTS, streamFn: fakeStream([
+    { type: 'error', reason: 'error', error: { errorMessage: 'провайдер лёг' } },
+  ]) }, async base => {
+    const events = await readSse(await post(base, { model: MODEL_REF, diff: 'д' }));
+    assert.equal(events.at(-1).event, 'error');
+    assert.ok(events.at(-1).data.message.includes('провайдер лёг'));
+  });
+});
+
+// --- Дополнительно к плану ---
+
+test('секрет (baseUrl провайдера) не уходит в текст события error', async () => {
+  // baseUrl фикстуры — https://api.deepseek.com — попадает в config.secrets
+  // безусловно (pi-config.js), независимо от длины apiKey. Ошибка провайдера,
+  // случайно содержащая его в тексте, не должна долетать до браузера как есть.
+  await withServer({ ...COMMIT_OPTS, streamFn: fakeStream([
+    { type: 'error', reason: 'error', error: { errorMessage: 'запрос к https://api.deepseek.com/v1/chat не прошёл' } },
+  ]) }, async base => {
+    const events = await readSse(await post(base, { model: MODEL_REF, diff: 'д' }));
+    assert.equal(events.at(-1).event, 'error');
+    assert.equal(events.at(-1).data.message.includes('api.deepseek.com'), false);
+    assert.ok(events.at(-1).data.message.includes('***'));
+  });
+});
+
+test('автоповтор ровно один раз: два неразбираемых ответа подряд — провайдер вызван дважды, наружу error', async () => {
+  const streamFn = sequentialStream([
+    [{ type: 'text_delta', delta: BAD_TEXT }, { type: 'done', reason: 'stop', message: {} }],
+    [{ type: 'text_delta', delta: BAD_TEXT }, { type: 'done', reason: 'stop', message: {} }],
+  ]);
+  await withServer({ ...COMMIT_OPTS, streamFn }, async base => {
+    const events = await readSse(await post(base, { model: MODEL_REF, diff: 'д' }));
+    assert.equal(streamFn.calls.length, 2, 'провайдер должен быть вызван ровно дважды, не трижды');
+    assert.equal(events.at(-1).event, 'error');
+  });
+});
+
+test('успешный автоповтор: первый ответ мусорный, второй валидный — done со вторым, в истории обе попытки', async () => {
+  const streamFn = sequentialStream([
+    [{ type: 'text_delta', delta: BAD_TEXT }, { type: 'done', reason: 'stop', message: {} }],
+    [{ type: 'text_delta', delta: 'x()' }, { type: 'done', reason: 'stop', message: {} }],
+  ]);
+  await withServer({ ...COMMIT_OPTS, streamFn }, async (base, app) => {
+    const events = await readSse(await post(base, { model: MODEL_REF, diff: 'д' }));
+    assert.equal(streamFn.calls.length, 2);
+    assert.equal(events.at(-1).event, 'done');
+    assert.equal(events.at(-1).data.code, 'x()');
+    const assistantTexts = app.state.history.messages
+      .filter(m => m.role === 'assistant')
+      .map(m => m.content[0].text);
+    assert.deepEqual(assistantTexts, [BAD_TEXT, 'x()']);
+  });
+});
+
+test('история не растёт при 400 (неизвестная модель)', async () => {
+  await withServer(COMMIT_OPTS, async (base, app) => {
+    await post(base, { model: { provider: 'нет', id: 'нет' }, diff: 'д' });
+    assert.equal(app.state.history.messages.length, 0);
+  });
+});
+
+test('result не передан — сообщения "результат:" в истории нет', async () => {
+  await withServer({ ...COMMIT_OPTS, streamFn: fakeStream([
+    { type: 'text_delta', delta: 'x()' },
+    { type: 'done', reason: 'stop', message: {} },
+  ]) }, async (base, app) => {
+    await post(base, { model: MODEL_REF, diff: 'диф без result' }).then(r => r.text());
+    assert.equal(app.state.history.messages.some(m =>
+      typeof m.content === 'string' && m.content.startsWith('результат:')), false);
+    assert.equal(app.state.history.messages[0].content, 'диф без result');
+  });
+});
+
+test('/api/session отдаёт растущее число токенов после хода', async () => {
+  await withServer({ ...COMMIT_OPTS, streamFn: fakeStream([
+    { type: 'text_delta', delta: 'x()' },
+    { type: 'done', reason: 'stop', message: {} },
+  ]) }, async base => {
+    const before = (await (await fetch(base + '/api/session')).json()).tokens;
+    await post(base, { model: MODEL_REF, diff: 'диф побольше текста, чтобы токены точно выросли' })
+      .then(r => r.text());
+    const after = (await (await fetch(base + '/api/session')).json()).tokens;
+    assert.ok(after > before, `${after} должно быть больше ${before}`);
+  });
+});
+
+test('/api/abort без активного хода не падает и отдаёт ok', async () => {
+  await withServer(COMMIT_OPTS, async base => {
+    const res = await fetch(base + '/api/abort', { method: 'POST' });
+    assert.equal(res.status, 200);
+    assert.deepEqual(await res.json(), { ok: true });
+  });
+});
+
+test('заголовки потока: /api/commit отвечает text/event-stream', async () => {
+  await withServer({ ...COMMIT_OPTS, streamFn: fakeStream([
+    { type: 'text_delta', delta: 'x()' },
+    { type: 'done', reason: 'stop', message: {} },
+  ]) }, async base => {
+    const res = await post(base, { model: MODEL_REF, diff: 'д' });
+    assert.match(res.headers.get('content-type'), /text\/event-stream/);
+    await res.text();
+  });
+});
+
+test('битое тело запроса не роняет сервер', async () => {
+  await withServer({ ...COMMIT_OPTS, streamFn: fakeStream([
+    { type: 'text_delta', delta: 'x()' },
+    { type: 'done', reason: 'stop', message: {} },
+  ]) }, async base => {
+    const bad = await fetch(base + '/api/commit', {
+      method: 'POST', headers: { 'content-type': 'application/json' },
+      body: 'это не json {{{',
+    });
+    assert.notEqual(bad.status, 200);
+    // Сервер должен остаться живым — следующий нормальный запрос обязан пройти.
+    const ok = await post(base, { model: MODEL_REF, diff: 'д' });
+    assert.equal(ok.status, 200);
+    await ok.text();
+  });
+});
+
 test('выход за пределы web/ запрещён: обходы через сырой сокет, минуя нормализацию клиента', async () => {
   // web/ ещё не существует по умолчанию (DEFAULT_WEB_ROOT), поэтому единственный
   // файл, который реально можно было бы прочитать через обход наружу — это

@@ -3,6 +3,10 @@ import { readFile } from 'node:fs/promises';
 import { join, normalize } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { loadConfig, publicView, scrub } from './pi-config.js';
+import { stream as openaiStream } from '@earendil-works/pi-ai/api/openai-completions';
+import { stream as anthropicStream } from '@earendil-works/pi-ai/api/anthropic-messages';
+import { extractCode, checkParsable } from './parse.js';
+import { createHistory, SYSTEM_PROMPT } from './context.js';
 
 const DEFAULT_WEB_ROOT = fileURLToPath(new URL('../web/', import.meta.url));
 
@@ -20,6 +24,27 @@ const MIME = {
 function json(res, code, body) {
   res.writeHead(code, { 'content-type': 'application/json; charset=utf-8' });
   res.end(JSON.stringify(body));
+}
+
+function sse(res, event, data) {
+  res.write(`event: ${event}\ndata: ${JSON.stringify(data)}\n\n`);
+}
+
+// Тело запроса читаем сами: встроенный http-модуль не парсит JSON.
+// Битый JSON здесь не глушится — бросает наружу, и уже вызывающий код
+// (обработчик маршрута внутри общего try/catch createServer) решает,
+// как ответить, не роняя сам процесс.
+function readJson(req) {
+  return new Promise((resolve, reject) => {
+    const chunks = [];
+    req.on('data', c => chunks.push(c));
+    req.on('end', () => {
+      const text = Buffer.concat(chunks).toString('utf8');
+      try { resolve(text ? JSON.parse(text) : {}); }
+      catch (e) { reject(new Error('некорректное тело запроса: ' + e.message)); }
+    });
+    req.on('error', reject);
+  });
 }
 
 async function serveStatic(res, pathname, root) {
@@ -49,7 +74,7 @@ async function serveStatic(res, pathname, root) {
 }
 
 export function createApp(opts = {}) {
-  const state = { config: null, opts };
+  const state = { config: null, opts, history: createHistory(), abort: null };
   const root = withTrailingSlash(opts.webRoot ?? DEFAULT_WEB_ROOT);
 
   async function reload() {
@@ -58,6 +83,71 @@ export function createApp(opts = {}) {
       env: opts.env, fetchImpl: opts.fetchImpl,
     });
     return state.config;
+  }
+
+  // opts.streamFn — подмена на тестах: сама функция вызывается с той же
+  // сигнатурой (model, context, options), что и настоящие openaiStream/
+  // anthropicStream, поэтому здесь возвращается ссылка на функцию,
+  // а не результат её вызова — вызовет её уже collect().
+  function pickStream(model) {
+    if (opts.streamFn) return opts.streamFn;
+    return model.api === 'anthropic-messages' ? anthropicStream : openaiStream;
+  }
+
+  async function collect(model, provider, signal, res) {
+    const events = pickStream(model)(
+      model,
+      { systemPrompt: SYSTEM_PROMPT, messages: state.history.messages },
+      { apiKey: provider?.apiKey, signal, maxTokens: model.maxTokens },
+    );
+    let text = '';
+    for await (const ev of events) {
+      if (ev.type === 'text_delta') { text += ev.delta; sse(res, 'delta', { text: ev.delta }); }
+      else if (ev.type === 'error') throw new Error(ev.error?.errorMessage ?? 'провайдер вернул ошибку');
+    }
+    return text;
+  }
+
+  async function handleCommit(req, res) {
+    const body = await readJson(req);
+    const c = state.config ?? await reload();
+    const model = c.models.find(m => m.provider === body.model?.provider && m.id === body.model?.id);
+    if (!model) return json(res, 400, { error: 'модель не найдена' });
+    const provider = c.providers.find(p => p.name === model.provider);
+
+    res.writeHead(200, {
+      'content-type': 'text/event-stream; charset=utf-8',
+      'cache-control': 'no-cache',
+      connection: 'keep-alive',
+    });
+
+    state.history.pushResult(body.result);
+    state.history.pushDiff(body.diff);
+
+    const ctl = new AbortController();
+    state.abort = ctl;
+    try {
+      let code = extractCode(await collect(model, provider, ctl.signal, res));
+      let check = checkParsable(code);
+      if (!check.ok) {
+        // §7 спецификации: ровно один автоповтор с текстом ошибки
+        state.history.pushCode(code, model);
+        state.history.pushDiff('код не разобрался: ' + check.error +
+          '\nпришли только исполнимый JavaScript');
+        code = extractCode(await collect(model, provider, ctl.signal, res));
+        check = checkParsable(code);
+      }
+      if (!check.ok) sse(res, 'error', { message: 'код не разбирается: ' + check.error });
+      else {
+        state.history.pushCode(code, model);
+        sse(res, 'done', { code });
+      }
+    } catch (e) {
+      sse(res, 'error', { message: scrub(e.message, c.secrets) });
+    } finally {
+      state.abort = null;
+      res.end();
+    }
   }
 
   const server = createServer(async (req, res) => {
@@ -89,6 +179,12 @@ export function createApp(opts = {}) {
       if (url.pathname === '/api/reload' && req.method === 'POST') {
         return json(res, 200, publicView(await reload()));
       }
+      if (url.pathname === '/api/commit' && req.method === 'POST') return await handleCommit(req, res);
+      if (url.pathname === '/api/abort' && req.method === 'POST') {
+        state.abort?.abort();
+        return json(res, 200, { ok: true });
+      }
+      if (url.pathname === '/api/session') return json(res, 200, { tokens: state.history.size() });
       if (url.pathname.startsWith('/api/')) return json(res, 404, { error: 'нет такого метода' });
       return await serveStatic(res, url.pathname, root);
     } catch (e) {
