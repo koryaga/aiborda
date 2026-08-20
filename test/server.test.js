@@ -7,7 +7,7 @@ import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { createApp } from '../server/index.js';
 
-const PACKAGE_JSON_NEEDLE = '"name": "dom-agent"';
+const PACKAGE_JSON_NEEDLE = '"name": "aiborda"';
 
 async function withServer(opts, fn) {
   const app = createApp(opts);
@@ -88,7 +88,7 @@ test('GET // с некорректным путём получает 400 (вет
 });
 
 test('serveStatic: .html/.css с правильным content-type, / отдаёт index.html, файл без точки — octet-stream, кириллица в имени раскодируется', async () => {
-  const webRoot = await mkdtemp(join(tmpdir(), 'dom-agent-web-'));
+  const webRoot = await mkdtemp(join(tmpdir(), 'aiborda-web-'));
   try {
     await writeFile(join(webRoot, 'index.html'), '<!doctype html><title>дом-агент</title>', 'utf8');
     await writeFile(join(webRoot, 'style.css'), 'body { color: red }', 'utf8');

@@ -251,7 +251,7 @@ export function createApp(opts = {}) {
 if (fileURLToPath(import.meta.url) === process.argv[1]) {
   const app = createApp({});
   await app.listen(8730, 8731);
-  console.log('dom-agent слушает http://127.0.0.1:8730, образ — http://127.0.0.1:8731');
+  console.log('aiborda слушает http://127.0.0.1:8730, образ — http://127.0.0.1:8731');
   try {
     const s = await app.warmup();
     const m = s.model;
