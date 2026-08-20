@@ -176,6 +176,18 @@ export async function loadConfig({
   for (const p of providers) {
     if (p.apiKey) continue;
     const entry = auth[p.name];
+
+    if (entry?.type === 'oauth') {
+      // Только чтение: обновление выдало бы новый refresh-токен и погасило
+      // старый, сломав вход у самого pi. В ~/.pi/ мы не пишем никогда.
+      if (typeof entry.expires === 'number' && entry.expires <= Date.now()) {
+        p.authExpired = true;
+        continue;
+      }
+      p.apiKey = typeof entry.access === 'string' ? entry.access : '';
+      continue;
+    }
+
     const stored = typeof entry?.key === 'string' ? entry.key
       : typeof entry?.apiKey === 'string' ? entry.apiKey : '';
     p.apiKey = stored || env[`${p.name.toUpperCase().replace(/[^A-Z0-9]/g, '_')}_API_KEY`] || '';
@@ -207,6 +219,10 @@ export async function loadConfig({
       const provider = byName.get(ref.provider);
       if (!provider) {
         notes.push(`${key}: провайдер не найден ни в models.json, ни среди встроенных`);
+        continue;
+      }
+      if (provider.authExpired) {
+        notes.push(`${key}: вход через pi истёк, войдите заново — pi auth login ${ref.provider}`);
         continue;
       }
       if (!provider.apiKey) {

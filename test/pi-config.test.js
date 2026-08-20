@@ -665,6 +665,131 @@ test('пользовательский провайдер есть, но так�
   });
 });
 
+// --- Task 4: oauth-учётка только на чтение ---
+
+async function withAuthFile(content, fn) {
+  const dir = await mkdtemp(join(tmpdir(), 'dom-agent-auth-'));
+  const path = join(dir, 'auth.json');
+  await writeFile(path, JSON.stringify(content));
+  try { await fn(path); } finally { await rm(dir, { recursive: true, force: true }); }
+}
+
+const HOUR = 3600_000;
+
+test('живой oauth-токен становится ключом провайдера', async () => {
+  await withAuthFile({ openrouter: { type: 'oauth', access: 'ZHIVOY-TOKEN',
+    refresh: 'obnovlyayushchiy', expires: Date.now() + HOUR } }, async authPath => {
+    await withSettingsFile({ enabledModels: ['openrouter/openrouter/free'] }, async settingsPath => {
+      const c = await loadConfig({
+        path: FIXTURE_MODELS_PATH, authPath, settingsPath, env: {}, fetchImpl: NO_NET,
+      });
+      assert.equal(c.models.length, 1);
+      assert.equal(c.providers.find(p => p.name === 'openrouter').apiKey, 'ZHIVOY-TOKEN');
+    });
+  });
+});
+
+test('истёкший oauth-токен: модель скрыта, заметка про повторный вход', async () => {
+  await withAuthFile({ openrouter: { type: 'oauth', access: 'STARYY',
+    refresh: 'obnovlyayushchiy', expires: Date.now() - HOUR } }, async authPath => {
+    await withSettingsFile({ enabledModels: ['openrouter/openrouter/free'] }, async settingsPath => {
+      const c = await loadConfig({
+        path: FIXTURE_MODELS_PATH, authPath, settingsPath, env: {}, fetchImpl: NO_NET,
+      });
+      assert.equal(c.models.length, 0);
+      assert.ok(c.notes.some(n => n.includes('pi')), 'заметка должна советовать войти через pi');
+    });
+  });
+});
+
+test('refresh-токен не попадает в ключ провайдера', async () => {
+  await withAuthFile({ openrouter: { type: 'oauth', access: 'ZHIVOY-TOKEN',
+    refresh: 'OBNOVLYAYUSHCHIY-SEKRET', expires: Date.now() + HOUR } }, async authPath => {
+    await withSettingsFile({ enabledModels: ['openrouter/openrouter/free'] }, async settingsPath => {
+      const c = await loadConfig({
+        path: FIXTURE_MODELS_PATH, authPath, settingsPath, env: {}, fetchImpl: NO_NET,
+      });
+      assert.equal(c.providers.find(p => p.name === 'openrouter').apiKey, 'ZHIVOY-TOKEN');
+      // но в secrets он быть обязан: сбор кандидатов обходит auth.json целиком
+      assert.ok(c.secrets.has('OBNOVLYAYUSHCHIY-SEKRET'));
+    });
+  });
+});
+
+test('oauth без expires считается живым', async () => {
+  await withAuthFile({ openrouter: { type: 'oauth', access: 'BEZ-SROKA' } }, async authPath => {
+    await withSettingsFile({ enabledModels: ['openrouter/openrouter/free'] }, async settingsPath => {
+      const c = await loadConfig({
+        path: FIXTURE_MODELS_PATH, authPath, settingsPath, env: {}, fetchImpl: NO_NET,
+      });
+      assert.equal(c.models.length, 1);
+    });
+  });
+});
+
+// --- Task 4: дополнительные тесты сверх плана ---
+
+test('ключ из models.json побеждает oauth-учётку', async () => {
+  // deepseek в фикстуре models.json задаёт apiKey напрямую (через $TEST_DS_KEY).
+  // Даже если в auth.json на deepseek лежит oauth-запись, цикл разрешения
+  // ключа обязан остановиться на "if (p.apiKey) continue" ДО oauth-ветки.
+  await withAuthFile({ deepseek: { type: 'oauth', access: 'DOLZHEN-BYT-IGNORIROVAN',
+    refresh: 'r', expires: Date.now() + HOUR } }, async authPath => {
+    await withSettingsFile({ enabledModels: ['deepseek/deepseek-v4-flash'] }, async settingsPath => {
+      const c = await loadConfig({
+        path: FIXTURE_MODELS_PATH, authPath, settingsPath,
+        env: { TEST_DS_KEY: 'секрет' }, fetchImpl: NO_NET,
+      });
+      assert.equal(c.models.length, 1);
+      assert.equal(c.providers.find(p => p.name === 'deepseek').apiKey, 'секрет');
+    });
+  });
+});
+
+test('нечисловой expires не считается истёкшим', async () => {
+  for (const badExpires of ['завтра', null, undefined]) {
+    const entry = { type: 'oauth', access: 'ZHIVOY-TOKEN', refresh: 'r' };
+    if (badExpires !== undefined) entry.expires = badExpires;
+    await withAuthFile({ openrouter: entry }, async authPath => {
+      await withSettingsFile({ enabledModels: ['openrouter/openrouter/free'] }, async settingsPath => {
+        const c = await loadConfig({
+          path: FIXTURE_MODELS_PATH, authPath, settingsPath, env: {}, fetchImpl: NO_NET,
+        });
+        assert.equal(c.models.length, 1, `expires=${JSON.stringify(badExpires)} не должен выглядеть истёкшим`);
+      });
+    });
+  }
+});
+
+test('oauth без access оставляет провайдера без ключа, модель уходит в заметку', async () => {
+  await withAuthFile({ openrouter: { type: 'oauth', refresh: 'obnovlyayushchiy', expires: Date.now() + HOUR } },
+    async authPath => {
+      await withSettingsFile({ enabledModels: ['openrouter/openrouter/free'] }, async settingsPath => {
+        const c = await loadConfig({
+          path: FIXTURE_MODELS_PATH, authPath, settingsPath, env: {}, fetchImpl: NO_NET,
+        });
+        assert.equal(c.models.length, 0);
+        assert.equal(c.providers.find(p => p.name === 'openrouter').apiKey, '');
+        assert.ok(c.notes.some(n => n.includes('openrouter')));
+      });
+    });
+});
+
+test('заметка про истёкший вход не содержит токенов после publicView', async () => {
+  await withAuthFile({ openrouter: { type: 'oauth', access: 'SEKRETNYY-ACCESS-TOKEN',
+    refresh: 'SEKRETNYY-REFRESH-TOKEN', expires: Date.now() - HOUR } }, async authPath => {
+    await withSettingsFile({ enabledModels: ['openrouter/openrouter/free'] }, async settingsPath => {
+      const c = await loadConfig({
+        path: FIXTURE_MODELS_PATH, authPath, settingsPath, env: {}, fetchImpl: NO_NET,
+      });
+      const view = publicView(c);
+      const json = JSON.stringify(view);
+      assert.equal(json.includes('SEKRETNYY-ACCESS-TOKEN'), false);
+      assert.equal(json.includes('SEKRETNYY-REFRESH-TOKEN'), false);
+    });
+  });
+});
+
 test('заметки о пропущенных моделях чистятся scrub через publicView', async () => {
   await withSettingsFile({
     enabledModels: ['takogo-net/model', 'openrouter/openrouter/free'],
