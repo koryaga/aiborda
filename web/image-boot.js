@@ -285,6 +285,16 @@ function createImage(doc, send, opts) {
     for (const t of ['input', 'change']) {
       doc.addEventListener(t, e => { if (trusted(e)) dirty.add(e.target); }, true);
     }
+    // Ctrl/Cmd+Enter. Событие клавиатуры из образа в оболочку не всплывает —
+    // это разные origin, — поэтому о нажатии сообщает сам образ.
+    // trusted() отсекает синтетические события: иначе код модели мог бы
+    // запустить ход за человека, просто разослав keydown.
+    doc.addEventListener('keydown', e => {
+      if (!trusted(e)) return;
+      if (e.key !== 'Enter' || !(e.ctrlKey || e.metaKey)) return;
+      e.preventDefault();
+      send({ type: 'commit' });
+    }, true);
     win.addEventListener('message', e => {
       if (e.source !== win.parent) return;
       handle(e.data);

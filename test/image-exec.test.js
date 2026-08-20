@@ -117,3 +117,46 @@ test('ошибка исполнения не роняет execDepth — след
   assert.equal(good.ok, true);
   assert.equal(good.value, '42');
 });
+
+function installed(trusted) {
+  const dom = new JSDOM('<body><textarea id="q"></textarea></body>', { runScripts: 'outside-only' });
+  const sent = [];
+  createImage(dom.window.document, m => sent.push(m), { trusted, grace: 0 }).install();
+  return { dom, doc: dom.window.document, commits: () => sent.filter(m => m.type === 'commit') };
+}
+
+function key(dom, doc, init) {
+  doc.querySelector('#q').dispatchEvent(new dom.window.KeyboardEvent('keydown',
+    { key: 'Enter', bubbles: true, cancelable: true, ...init }));
+}
+
+test('Ctrl+Enter в образе просит оболочку отправить ход', () => {
+  const { dom, doc, commits } = installed(() => true);
+  key(dom, doc, { ctrlKey: true });
+  assert.equal(commits().length, 1);
+});
+
+test('Cmd+Enter работает так же', () => {
+  const { dom, doc, commits } = installed(() => true);
+  key(dom, doc, { metaKey: true });
+  assert.equal(commits().length, 1);
+});
+
+test('Enter без модификатора ход не запускает', () => {
+  const { dom, doc, commits } = installed(() => true);
+  key(dom, doc, {});
+  assert.equal(commits().length, 0);
+});
+
+test('другая клавиша с Ctrl ход не запускает', () => {
+  const { dom, doc, commits } = installed(() => true);
+  doc.querySelector('#q').dispatchEvent(new dom.window.KeyboardEvent('keydown',
+    { key: 'a', ctrlKey: true, bubbles: true }));
+  assert.equal(commits().length, 0);
+});
+
+test('синтетический Ctrl+Enter от кода модели игнорируется', () => {
+  const { dom, doc, commits } = installed(e => e.isTrusted);
+  key(dom, doc, { ctrlKey: true });
+  assert.equal(commits().length, 0, 'модель не должна отправлять ход за человека');
+});

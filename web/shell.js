@@ -22,6 +22,10 @@ addEventListener('message', e => {
   const m = e.data;
   if (!m || typeof m !== 'object') return;
   if (m.type === 'ready') { setState('свободна'); return; }
+  // Человек нажал Ctrl/Cmd+Enter внутри образа. Образ фильтрует синтетические
+  // события, но подделать это сообщение напрямую код модели всё же может —
+  // ущерб ограничен: во время хода commit() выходит сразу, а диф будет пуст.
+  if (m.type === 'commit') { commit(); return; }
   const p = pending.get(m.id);
   if (!p) { say('незапрошенное сообщение от образа отброшено'); return; }
   pending.delete(m.id);
