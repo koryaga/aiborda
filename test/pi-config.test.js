@@ -269,7 +269,7 @@ test('publicView отдаёт models/notes/error, вычищенные от кл
     fetchImpl: fake,
   });
   const view = publicView(cfg);
-  assert.deepEqual(Object.keys(view).sort(), ['error', 'models', 'notes']);
+  assert.deepEqual(Object.keys(view).sort(), ['default', 'error', 'models', 'notes']);
   const json = JSON.stringify(view);
   assert.equal(json.includes('секрет-из-теста'), false);
   assert.equal(json.includes('api.deepseek.com'), false);

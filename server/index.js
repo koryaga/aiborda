@@ -89,13 +89,17 @@ export function createApp(opts = {}) {
   // сигнатурой (model, context, options), что и настоящие openaiStream/
   // anthropicStream, поэтому здесь возвращается ссылка на функцию,
   // а не результат её вызова — вызовет её уже collect().
-  function pickStream(model) {
+  function pickStream(model, provider) {
     if (opts.streamFn) return opts.streamFn;
+    // Встроенный провайдер несёт собственный поток, поэтому его api-тип
+    // (openai-responses, google-generative-ai, openai-codex-responses)
+    // не требует от нас адаптера.
+    if (provider?.streamFn) return provider.streamFn;
     return model.api === 'anthropic-messages' ? anthropicStream : openaiStream;
   }
 
   async function collect(model, provider, signal, res) {
-    const events = pickStream(model)(
+    const events = pickStream(model, provider)(
       model,
       { systemPrompt: SYSTEM_PROMPT, messages: state.history.messages },
       { apiKey: provider?.apiKey, signal, maxTokens: model.maxTokens },

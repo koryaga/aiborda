@@ -122,7 +122,7 @@ test('POST /api/reload перечитывает конфиг и отдаёт т�
       const reloaded = await reloadRes.json();
       assert.equal(reloadRes.status, 200);
       assert.deepEqual(reloaded.models.map(m => m.id).sort(), ['reload-m1', 'reload-m2']);
-      assert.deepEqual(Object.keys(reloaded).sort(), ['error', 'models', 'notes']);
+      assert.deepEqual(Object.keys(reloaded).sort(), ['default', 'error', 'models', 'notes']);
       // Ключи из cfgV2 не должны утечь ни в одном канале.
       assert.equal(JSON.stringify(reloaded).includes('ключ-два'), false);
 
@@ -476,4 +476,49 @@ test('выход за пределы web/ запрещён: обходы чер�
       }
     });
   });
+});
+
+test('модель встроенного провайдера уходит через его собственный поток', async () => {
+  let usedBuiltin = false;
+  const provider = { name: 'vstroennyy', apiKey: 'kluch', builtin: true,
+    baseUrl: 'https://primer', streamFn: () => { usedBuiltin = true; return fakeStream([
+      { type: 'text_delta', delta: 'x()' },
+      { type: 'done', reason: 'stop', message: {} },
+    ])(); } };
+  const model = { provider: 'vstroennyy', id: 'm', api: 'openai-responses', maxTokens: 16 };
+
+  const app = createApp({ configPath: '/нет', authPath: '/нет', settingsPath: '/нет' });
+  app.state.config = { models: [model], providers: [provider], notes: [], secrets: new Set(),
+    default: null, error: null };
+  await app.listen(0);
+  try {
+    const events = await readSse(await fetch(`http://127.0.0.1:${app.port}/api/commit`, {
+      method: 'POST', headers: { 'content-type': 'application/json' },
+      body: JSON.stringify({ model: { provider: 'vstroennyy', id: 'm' }, diff: 'д' }),
+    }));
+    assert.equal(usedBuiltin, true, 'должен был использоваться streamFn провайдера');
+    assert.equal(events.at(-1).event, 'done');
+    assert.equal(events.at(-1).data.code, 'x()');
+  } finally { await app.close(); }
+});
+
+test('пользовательская модель по-прежнему идёт через адаптер по api', async () => {
+  await withServer({ ...COMMIT_OPTS, streamFn: fakeStream([
+    { type: 'text_delta', delta: 'y()' },
+    { type: 'done', reason: 'stop', message: {} },
+  ]) }, async base => {
+    const events = await readSse(await post(base, { model: MODEL_REF, diff: 'д' }));
+    assert.equal(events.at(-1).data.code, 'y()');
+  });
+});
+
+test('GET /api/models отдаёт умолчание', async () => {
+  const app = createApp({ configPath: '/нет', authPath: '/нет', settingsPath: '/нет' });
+  app.state.config = { models: [], providers: [], notes: [], secrets: new Set(),
+    error: null, default: { provider: 'deepseek', id: 'deepseek-v4-pro' } };
+  await app.listen(0);
+  try {
+    const body = await (await fetch(`http://127.0.0.1:${app.port}/api/models`)).json();
+    assert.deepEqual(body.default, { provider: 'deepseek', id: 'deepseek-v4-pro' });
+  } finally { await app.close(); }
 });

@@ -269,6 +269,7 @@ export function publicView(c) {
     models: publicModels(c.models),
     notes: c.notes.map(n => scrub(n, c.secrets)),
     error: c.error ? scrub(c.error, c.secrets) : null,
+    default: c.default ?? null,
   };
 }
 
