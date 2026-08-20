@@ -1,6 +1,7 @@
 const frame = document.getElementById('image');
 const dot = document.getElementById('dot');
 const sendBtn = document.getElementById('send');
+const modelLabel = document.getElementById('model');
 const log = document.getElementById('log');
 
 let seq = 0;
@@ -40,9 +41,15 @@ function ask(msg, timeout = 5000) {
   });
 }
 
+// Модель ведёт pi, у нас её не выбирают — только показываем.
+function showModel(m) {
+  modelLabel.textContent = m ? m.provider + ' / ' + m.id : '—';
+}
+
 async function boot() {
-  const { imageOrigin } = await fetch('api/config').then(r => r.json());
+  const { imageOrigin, model } = await fetch('api/config').then(r => r.json());
   imageAllowedOrigin = imageOrigin;
+  showModel(model);
   frame.src = imageOrigin + '/image.html';
 }
 
@@ -64,6 +71,7 @@ function listen() {
     });
   });
   es.addEventListener('agent', e => { setState(JSON.parse(e.data).type ?? 'думает'); });
+  es.addEventListener('model', e => { showModel(JSON.parse(e.data)); });
   es.onerror = () => setState('связь потеряна');
 }
 

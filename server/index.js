@@ -4,6 +4,7 @@ import { join, normalize } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { createBridge } from './bridge.js';
 import { startSession } from './agent.js';
+import { createPrinter } from './stream-log.js';
 
 const DEFAULT_WEB_ROOT = fileURLToPath(new URL('../web/', import.meta.url));
 
@@ -75,6 +76,16 @@ export function createApp(opts = {}) {
   const root = withTrailingSlash(opts.webRoot ?? DEFAULT_WEB_ROOT);
 
   const bridge = createBridge({ send: null });
+  // Поток модели идёт в stdout: видно текст, рассуждения и вызовы
+  // инструментов по мере генерации. opts.print === false глушит в тестах.
+  const printEvent = opts.print === false ? () => {} : createPrinter();
+
+  // Модель ведёт pi: своей конфигурации у нас нет, поэтому просто спрашиваем
+  // сессию. До первого хода сессии ещё нет — тогда null.
+  const modelRef = () => {
+    const m = state.session?.model;
+    return m ? { provider: m.provider, id: m.id } : null;
+  };
   const listeners = new Set();
 
   // Оболочка держит открытый SSE; по нему сервер шлёт запросы page_exec и
@@ -91,7 +102,12 @@ export function createApp(opts = {}) {
     const factory = opts.sessionFactory ?? startSession;
     const { session } = await factory({ callPage: code => bridge.call(code) });
     state.session = session;
-    session.subscribe(ev => { if (ev?.type) broadcast('agent', { type: ev.type }); });
+    session.subscribe(ev => {
+      if (!ev?.type) return;
+      broadcast('agent', { type: ev.type });
+      if (ev.type === 'model_select') broadcast('model', modelRef());
+      printEvent(ev);
+    });
     return session;
   }
 
@@ -146,7 +162,7 @@ export function createApp(opts = {}) {
         return json(res, 200, { ok: true });
       }
       if (url.pathname === '/api/config') {
-        return json(res, 200, { imageOrigin: `http://127.0.0.1:${imageServer.address()?.port}` });
+        return json(res, 200, { imageOrigin: `http://127.0.0.1:${imageServer.address()?.port}`, model: modelRef() });
       }
       if (url.pathname === '/api/events') {
         res.writeHead(200, {
@@ -220,6 +236,9 @@ export function createApp(opts = {}) {
       });
       return Promise.all([up(server, port), up(imageServer, imgPort)]);
     },
+    // Поднять сессию заранее, чтобы имя модели было известно до первого хода.
+    // Зовётся только из точки входа: тесты создают сессию своей заглушкой.
+    warmup: () => ensureSession(),
     close() {
       return Promise.all([
         new Promise(r => server.close(r)),
@@ -233,4 +252,11 @@ if (fileURLToPath(import.meta.url) === process.argv[1]) {
   const app = createApp({});
   await app.listen(8730, 8731);
   console.log('dom-agent слушает http://127.0.0.1:8730, образ — http://127.0.0.1:8731');
+  try {
+    const s = await app.warmup();
+    const m = s.model;
+    console.log('модель:', m ? `${m.provider}/${m.id}` : '(не определена)');
+  } catch (e) {
+    console.log('сессия не поднялась:', e.message);
+  }
 }

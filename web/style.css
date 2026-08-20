@@ -9,3 +9,5 @@ main { display: flex; flex-direction: column; height: 100vh; }
        font: 12px/1.4 ui-monospace, monospace; white-space: pre-wrap; }
 @media (max-width: 900px) { #bar { flex-wrap: wrap; } }
 @media (prefers-reduced-motion: reduce) { * { transition: none !important; } }
+
+#model { opacity: .6; font-size: 12px; }

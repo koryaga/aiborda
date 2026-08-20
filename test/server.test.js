@@ -225,10 +225,11 @@ test('page_exec от модели доходит до подписчика SSE �
     },
   });
   await app.listen(0, 0);
+  let reader = null;
   try {
     // подписываемся на события, как это делает оболочка
     const es = await fetch(`http://127.0.0.1:${app.port}/api/events`);
-    const reader = es.body.getReader();
+    reader = es.body.getReader();
     const dec = new TextDecoder();
 
     // поднимаем сессию — она создаётся лениво при первом ходе
@@ -238,18 +239,28 @@ test('page_exec от модели доходит до подписчика SSE �
     }).then(r => r.text());
 
     const pending = callPage('return 2 + 2');
-    // читаем кадр с запросом
-    const chunk = dec.decode((await reader.read()).value);
-    const m = /"id":"(p\d+)"/.exec(chunk);
-    assert.ok(m, 'в потоке должен быть запрос page_exec с id: ' + chunk);
+    // Читаем, пока не увидим кадр с запросом: в потоке могут идти и другие
+    // события, и один read() не обязан вернуть целый кадр.
+    let buf = '', m = null;
+    for (let i = 0; i < 10 && !m; i++) {
+      const { value, done } = await reader.read();
+      if (done) break;
+      buf += dec.decode(value, { stream: true });
+      m = /"id":"(p\d+)"/.exec(buf);
+    }
+    assert.ok(m, 'в потоке должен быть запрос page_exec с id: ' + buf);
 
     await fetch(`http://127.0.0.1:${app.port}/api/page-result`, {
       method: 'POST', headers: { 'content-type': 'application/json' },
       body: JSON.stringify({ id: m[1], ok: true, value: '4' }),
     });
     assert.deepEqual(await pending, { ok: true, value: '4' });
-    reader.cancel();
-  } finally { await app.close(); }
+  } finally {
+    // Отпускаем поток до close(): иначе открытое соединение держит сервер,
+    // и при упавшем ассерте close() ждёт его вечно — тест виснет вместо падения.
+    try { await reader?.cancel(); } catch {}
+    await app.close();
+  }
 });
 
 test('заголовки потока: /api/commit отвечает text/event-stream', async () => {
