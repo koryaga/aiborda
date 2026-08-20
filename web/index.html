@@ -1,0 +1,16 @@
+<!doctype html>
+<html lang="ru">
+<meta charset="utf-8">
+<title>DOM-агент</title>
+<link rel="stylesheet" href="style.css">
+<main>
+  <iframe id="image" sandbox="allow-scripts" title="образ"></iframe>
+  <div id="bar">
+    <select id="model" aria-label="модель"></select>
+    <span id="dot" aria-live="polite">—</span>
+    <button id="send">отправить</button>
+  </div>
+  <pre id="log" aria-live="polite"></pre>
+</main>
+<script type="module" src="shell.js"></script>
+</html>
