@@ -59,6 +59,10 @@ test('GET /api/models отдаёт только provider, id и contextWindow', 
   await withServer({
     configPath: FIXTURE,
     authPath: '/no/auth.json',
+    // Изолируем от настоящего ~/.pi/agent/settings.json разработчика: без этого
+    // enabledModels на реальной машине фильтрует список моделей теста и делает
+    // его недетерминированным между машинами.
+    settingsPath: '/no/settings.json',
     env: { TEST_DS_KEY: 'очень-секретный-ключ' },
     fetchImpl: async () => { throw new Error('оффлайн'); },
   }, async base => {
@@ -97,7 +101,10 @@ test('POST /api/reload перечитывает конфиг и отдаёт т�
   };
   await writeFile(configPath, JSON.stringify(cfgV1));
   try {
-    await withServer({ configPath, authPath, env: {} }, async base => {
+    // settingsPath — заведомо не существующий путь внутри того же tmpdir:
+    // без изоляции реальный ~/.pi/agent/settings.json разработчика (если он
+    // есть) отфильтровал бы reload-m1/reload-m2 через enabledModels.
+    await withServer({ configPath, authPath, settingsPath: join(dir, 'settings.json'), env: {} }, async base => {
       const before = await (await fetch(base + '/api/models')).json();
       assert.deepEqual(before.models.map(m => m.id), ['reload-m1']);
 
@@ -249,6 +256,10 @@ async function readSse(res) {
 const COMMIT_OPTS = {
   configPath: FIXTURE,
   authPath: '/no/auth.json',
+  // См. комментарий у первого теста /api/models: без изоляции настоящий
+  // ~/.pi/agent/settings.json разработчика фильтрует MODEL_REF через
+  // enabledModels и делает эти тесты недетерминированными между машинами.
+  settingsPath: '/no/settings.json',
   env: { TEST_DS_KEY: 'k' },
   fetchImpl: async () => { throw new Error('оффлайн'); },
 };

@@ -79,7 +79,7 @@ export function createApp(opts = {}) {
 
   async function reload() {
     state.config = await loadConfig({
-      path: opts.configPath, authPath: opts.authPath,
+      path: opts.configPath, authPath: opts.authPath, settingsPath: opts.settingsPath,
       env: opts.env, fetchImpl: opts.fetchImpl,
     });
     return state.config;

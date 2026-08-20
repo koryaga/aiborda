@@ -2,6 +2,7 @@ import { readFile } from 'node:fs/promises';
 import { homedir } from 'node:os';
 import { join } from 'node:path';
 import { getBuiltinModels, builtinProviders } from '@earendil-works/pi-ai/providers/all';
+import { loadSettings, DEFAULT_SETTINGS_PATH } from './pi-settings.js';
 
 export const DEFAULT_MODELS_PATH = join(homedir(), '.pi', 'agent', 'models.json');
 export const DEFAULT_AUTH_PATH = join(homedir(), '.pi', 'agent', 'auth.json');
@@ -137,6 +138,7 @@ function collectSecretCandidates(value, out) {
 export async function loadConfig({
   path = DEFAULT_MODELS_PATH,
   authPath = DEFAULT_AUTH_PATH,
+  settingsPath = DEFAULT_SETTINGS_PATH,
   env = process.env,
   fetchImpl = globalThis.fetch,
 } = {}) {
@@ -147,12 +149,29 @@ export async function loadConfig({
     // на месте, но не разбирается (JSON.parse кидает SyntaxError); отсутствие файла молчит.
     const notes = e instanceof SyntaxError ? [`models.json не разобран — ${e.message}`] : [];
     return { providers: [], models: [], notes, secrets: new Set(),
+      default: null,
       error: `не найден ${path} — создайте его или укажите --pi-config` };
   }
 
   const { auth, error: authError } = await readAuth(authPath);
   const { providers, models, notes } = flattenModels(raw, { env });
   if (authError) notes.push(`auth.json не разобран — ${authError}`);
+
+  const settings = await loadSettings({ path: settingsPath });
+  notes.push(...settings.notes);
+
+  // Встроенные провайдеры подключаются только когда есть отобранный список.
+  // Без него они дали бы четыреста пунктов в селекторе.
+  if (settings.enabled.length) {
+    const known = new Set(providers.map(p => p.name));
+    for (const ref of settings.enabled) {
+      if (known.has(ref.provider)) continue;
+      const rec = builtinProviderRecord(ref.provider);
+      if (!rec) continue;      // заметка появится при разрешении ссылки ниже
+      providers.push(rec);
+      known.add(ref.provider);
+    }
+  }
 
   for (const p of providers) {
     if (p.apiKey) continue;
@@ -171,6 +190,39 @@ export async function loadConfig({
     } catch (e) { notes.push(`провайдер ${p.name}: список моделей не получен — ${e.message}`); }
   }
 
+  let finalModels = models;
+  if (settings.enabled.length) {
+    const byRef = new Map(models.map(m => [m.provider + '/' + m.id, m]));
+    const byName = new Map(providers.map(p => [p.name, p]));
+    const resolved = [];
+    const seen = new Set();
+    for (const ref of settings.enabled) {
+      const key = ref.provider + '/' + ref.id;
+      if (seen.has(key)) continue;
+      seen.add(key);
+
+      const custom = byRef.get(key);
+      if (custom) { resolved.push(custom); continue; }
+
+      const provider = byName.get(ref.provider);
+      if (!provider) {
+        notes.push(`${key}: провайдер не найден ни в models.json, ни среди встроенных`);
+        continue;
+      }
+      if (!provider.apiKey) {
+        notes.push(`${key}: пропущена, ключ провайдера ${ref.provider} не найден`);
+        continue;
+      }
+      const builtin = findBuiltinModel(ref.provider, ref.id);
+      if (!builtin) {
+        notes.push(`${key}: модель не найдена у провайдера`);
+        continue;
+      }
+      resolved.push(builtin);
+    }
+    finalModels = resolved;
+  }
+
   // «secrets» — не только ключи, несмотря на имя (не переименовываем: на него
   // уже завязаны другие задачи). Сюда же попадает baseUrl каждого провайдера:
   // это второе, что не должно уйти в браузер, и полагаться на дисциплину
@@ -185,7 +237,7 @@ export async function loadConfig({
     if (p.baseUrl) secrets.add(p.baseUrl);
   }
 
-  return { providers, models, notes, secrets, error: null };
+  return { providers, models: finalModels, notes, secrets, default: settings.default, error: null };
 }
 
 export function publicModels(models) {

@@ -10,6 +10,15 @@ const raw = JSON.parse(await readFile(new URL('./fixtures/models.json', import.m
 // fileURLToPath (не .pathname) декодирует пробелы и юникод в пути проекта корректно.
 const FIXTURE_MODELS_PATH = fileURLToPath(new URL('./fixtures/models.json', import.meta.url));
 
+async function withSettingsFile(content, fn) {
+  const dir = await mkdtemp(join(tmpdir(), 'dom-agent-'));
+  const path = join(dir, 'settings.json');
+  await writeFile(path, typeof content === 'string' ? content : JSON.stringify(content));
+  try { await fn(path); } finally { await rm(dir, { recursive: true, force: true }); }
+}
+
+const NO_NET = async () => { throw new Error('оффлайн'); };
+
 test('expandVars разворачивает $VAR из окружения', () => {
   assert.equal(expandVars('$TEST_DS_KEY', { TEST_DS_KEY: 'секрет' }), 'секрет');
   assert.equal(expandVars('${TEST_DS_KEY}', { TEST_DS_KEY: 'секрет' }), 'секрет');
@@ -514,4 +523,163 @@ test('streamFn действительно зовёт поток провайде
   assert.ok(seen, 'запрос должен был уйти в подставной fetch');
   const auth = JSON.stringify(seen.headers instanceof Headers ? Object.fromEntries(seen.headers) : (seen.headers ?? {}));
   assert.ok(auth.includes(TEST_KEY), 'ключ должен попасть в заголовки: ' + auth);
+});
+
+// --- Task 3: enabledModels как источник списка моделей ---
+
+test('enabledModels становится списком моделей', async () => {
+  await withSettingsFile({
+    enabledModels: ['deepseek/deepseek-v4-flash', 'openrouter/openrouter/free'],
+  }, async settingsPath => {
+    const c = await loadConfig({
+      path: FIXTURE_MODELS_PATH, authPath: '/нет/auth.json', settingsPath,
+      env: { TEST_DS_KEY: 'секрет', OPENROUTER_API_KEY: 'kluch-routera' }, fetchImpl: NO_NET,
+    });
+    assert.equal(c.models.length, 2);
+    assert.ok(c.models.some(m => m.provider === 'deepseek' && m.id === 'deepseek-v4-flash'));
+    assert.ok(c.models.some(m => m.provider === 'openrouter' && m.id === 'openrouter/free'));
+  });
+});
+
+test('пользовательский провайдер побеждает встроенный при совпадении', async () => {
+  await withSettingsFile({ enabledModels: ['deepseek/deepseek-v4-flash'] }, async settingsPath => {
+    const c = await loadConfig({
+      path: FIXTURE_MODELS_PATH, authPath: '/нет/auth.json', settingsPath,
+      env: { TEST_DS_KEY: 'секрет' }, fetchImpl: NO_NET,
+    });
+    const m = c.models.find(x => x.id === 'deepseek-v4-flash');
+    // Различаем источник по compat, а НЕ по contextWindow: у встроенного
+    // deepseek-v4-flash он тоже 1000000, и такая проверка прошла бы при любом
+    // источнике. У встроенного compat из пяти ключей, у собранного нашим
+    // toModel — ровно один, унаследованный от провайдера в фикстуре.
+    assert.deepEqual(m.compat, { supportsDeveloperRole: false });
+  });
+});
+
+test('неразрешимая запись даёт заметку и не роняет загрузку', async () => {
+  await withSettingsFile({
+    enabledModels: ['takogo-net/model', 'deepseek/deepseek-v4-flash'],
+  }, async settingsPath => {
+    const c = await loadConfig({
+      path: FIXTURE_MODELS_PATH, authPath: '/нет/auth.json', settingsPath,
+      env: { TEST_DS_KEY: 'секрет' }, fetchImpl: NO_NET,
+    });
+    assert.equal(c.error, null);
+    assert.equal(c.models.length, 1);
+    assert.ok(c.notes.some(n => n.includes('takogo-net')));
+  });
+});
+
+test('модель без ключа не попадает в список', async () => {
+  await withSettingsFile({ enabledModels: ['openrouter/openrouter/free'] }, async settingsPath => {
+    const c = await loadConfig({
+      path: FIXTURE_MODELS_PATH, authPath: '/нет/auth.json', settingsPath,
+      env: {}, fetchImpl: NO_NET,
+    });
+    assert.equal(c.models.length, 0);
+    assert.ok(c.notes.some(n => n.includes('openrouter')));
+  });
+});
+
+test('пустой enabledModels даёт прежнее поведение', async () => {
+  await withSettingsFile({ enabledModels: [] }, async settingsPath => {
+    const c = await loadConfig({
+      path: FIXTURE_MODELS_PATH, authPath: '/нет/auth.json', settingsPath,
+      env: { TEST_DS_KEY: 'секрет' }, fetchImpl: NO_NET,
+    });
+    assert.ok(c.models.some(m => m.provider === 'deepseek'));
+    assert.equal(c.models.some(m => m.provider === 'openrouter'), false);
+  });
+});
+
+test('отсутствующий settings.json даёт прежнее поведение', async () => {
+  const c = await loadConfig({
+    path: FIXTURE_MODELS_PATH, authPath: '/нет/auth.json', settingsPath: '/нет/settings.json',
+    env: { TEST_DS_KEY: 'секрет' }, fetchImpl: NO_NET,
+  });
+  assert.ok(c.models.some(m => m.provider === 'deepseek'));
+});
+
+test('умолчание доезжает до результата загрузки', async () => {
+  await withSettingsFile({
+    enabledModels: ['deepseek/deepseek-v4-flash'],
+    defaultProvider: 'deepseek', defaultModel: 'deepseek-v4-flash',
+  }, async settingsPath => {
+    const c = await loadConfig({
+      path: FIXTURE_MODELS_PATH, authPath: '/нет/auth.json', settingsPath,
+      env: { TEST_DS_KEY: 'секрет' }, fetchImpl: NO_NET,
+    });
+    assert.deepEqual(c.default, { provider: 'deepseek', id: 'deepseek-v4-flash' });
+  });
+});
+
+test('baseUrl встроенного провайдера попадает в secrets', async () => {
+  await withSettingsFile({ enabledModels: ['openrouter/openrouter/free'] }, async settingsPath => {
+    const c = await loadConfig({
+      path: FIXTURE_MODELS_PATH, authPath: '/нет/auth.json', settingsPath,
+      env: { OPENROUTER_API_KEY: 'kluch-routera' }, fetchImpl: NO_NET,
+    });
+    assert.ok([...c.secrets].some(s => s.includes('openrouter.ai')));
+    assert.ok(c.secrets.has('kluch-routera'));
+  });
+});
+
+// --- Дополнительные тесты (проверка на дефекты сверх плана) ---
+
+test('порядок моделей в результате соответствует порядку enabledModels, а не порядку провайдеров', async () => {
+  await withSettingsFile({
+    // Порядок нарочно "против" models.json: сперва openrouter (встроенный,
+    // добавляется последним в providers), потом deepseek (первый в фикстуре).
+    enabledModels: ['openrouter/openrouter/free', 'deepseek/deepseek-v4-flash'],
+  }, async settingsPath => {
+    const c = await loadConfig({
+      path: FIXTURE_MODELS_PATH, authPath: '/нет/auth.json', settingsPath,
+      env: { TEST_DS_KEY: 'секрет', OPENROUTER_API_KEY: 'kluch-routera' }, fetchImpl: NO_NET,
+    });
+    assert.deepEqual(c.models.map(m => m.provider), ['openrouter', 'deepseek']);
+  });
+});
+
+test('дубль в enabledModels не даёт двух записей', async () => {
+  await withSettingsFile({
+    enabledModels: ['deepseek/deepseek-v4-flash', 'deepseek/deepseek-v4-flash'],
+  }, async settingsPath => {
+    const c = await loadConfig({
+      path: FIXTURE_MODELS_PATH, authPath: '/нет/auth.json', settingsPath,
+      env: { TEST_DS_KEY: 'секрет' }, fetchImpl: NO_NET,
+    });
+    assert.equal(c.models.filter(m => m.provider === 'deepseek' && m.id === 'deepseek-v4-flash').length, 1);
+  });
+});
+
+test('пользовательский провайдер есть, но такой модели у него нет — заметка, а не молчаливый пропуск', async () => {
+  await withSettingsFile({
+    enabledModels: ['deepseek/такой-модели-нет'],
+  }, async settingsPath => {
+    const c = await loadConfig({
+      path: FIXTURE_MODELS_PATH, authPath: '/нет/auth.json', settingsPath,
+      env: { TEST_DS_KEY: 'секрет' }, fetchImpl: NO_NET,
+    });
+    assert.equal(c.models.length, 0);
+    assert.ok(c.notes.some(n => n.includes('deepseek') && n.includes('такой-модели-нет')));
+  });
+});
+
+test('заметки о пропущенных моделях чистятся scrub через publicView', async () => {
+  await withSettingsFile({
+    enabledModels: ['takogo-net/model', 'openrouter/openrouter/free'],
+  }, async settingsPath => {
+    const c = await loadConfig({
+      path: FIXTURE_MODELS_PATH, authPath: '/нет/auth.json', settingsPath,
+      env: {}, fetchImpl: NO_NET,
+    });
+    // Без ключа openrouter тоже даст заметку — обе должны пройти publicView.
+    assert.ok(c.notes.length >= 2);
+    const view = publicView(c);
+    const json = JSON.stringify(view);
+    for (const s of c.secrets) {
+      if (!s) continue;
+      assert.equal(json.includes(s), false, `секрет "${s}" протёк в publicView`);
+    }
+  });
 });
