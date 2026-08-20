@@ -4,13 +4,34 @@
 <title>образ</title>
 <style>
   :root { color-scheme: light dark; }
-  body { margin: 0; padding: .75rem; font: 14px/1.5 system-ui, sans-serif; }
-  #q { width: 100%; box-sizing: border-box; font: inherit; }
+  /* Колонка на всю высоту: контент растёт сверху, поле ввода прижато вниз —
+     оно оказывается вплотную к кнопке «отправить», которая живёт в оболочке
+     сразу под фреймом. */
+  body {
+    margin: 0;
+    padding: .75rem;
+    box-sizing: border-box;
+    min-height: 100vh;
+    display: flex;
+    flex-direction: column;
+    font: 14px/1.5 system-ui, sans-serif;
+  }
+  /* margin-top: auto прижимает поле вниз, когда контента мало;
+     sticky держит его на виду, когда контента много и страница скроллится. */
+  #q {
+    margin-top: auto;
+    position: sticky;
+    bottom: 0;
+    width: 100%;
+    box-sizing: border-box;
+    font: inherit;
+    background: Canvas;
+  }
 </style>
-<textarea id="q" rows="3"></textarea>
 <ul id="items"></ul>
 <div id="out"></div>
 <div id="notes" hidden></div>
+<textarea id="q" rows="3"></textarea>
 <script src="image-boot.js"></script>
 <script>
   createImage(document, m => parent.postMessage(m, '*')).install();
