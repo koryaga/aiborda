@@ -225,26 +225,6 @@ test('serveStatic: .html/.css с правильным content-type, / отдаё
   }
 });
 
-function fakeStream(events) {
-  return () => ({
-    async *[Symbol.asyncIterator]() { for (const e of events) yield e; },
-  });
-}
-
-// В отличие от fakeStream (одна и та же лента для любого числа вызовов),
-// эта фабрика различает попытки — нужна для проверки автоповтора: считает
-// вызовы и на каждый следующий отдаёт свою заготовленную ленту событий.
-function sequentialStream(replySets) {
-  const calls = [];
-  const fn = (model, context, options) => {
-    const events = replySets[calls.length] ?? replySets[replySets.length - 1];
-    calls.push({ model, context, options });
-    return { async *[Symbol.asyncIterator]() { for (const e of events) yield e; } };
-  };
-  fn.calls = calls;
-  return fn;
-}
-
 async function readSse(res) {
   const out = [];
   for (const frame of (await res.text()).split('\n\n')) {
@@ -259,19 +239,6 @@ async function readSse(res) {
   return out;
 }
 
-const COMMIT_OPTS = {
-  configPath: FIXTURE,
-  authPath: '/no/auth.json',
-  // См. комментарий у первого теста /api/models: без изоляции настоящий
-  // ~/.pi/agent/settings.json разработчика фильтрует MODEL_REF через
-  // enabledModels и делает эти тесты недетерминированными между машинами.
-  settingsPath: '/no/settings.json',
-  env: { TEST_DS_KEY: 'k' },
-  fetchImpl: async () => { throw new Error('оффлайн'); },
-};
-
-const MODEL_REF = { provider: 'deepseek', id: 'deepseek-v4-flash' };
-
 function post(base, body) {
   return fetch(base + '/api/commit', {
     method: 'POST', headers: { 'content-type': 'application/json' },
@@ -279,170 +246,259 @@ function post(base, body) {
   });
 }
 
-const BAD_TEXT = 'это не код, а просто текст';
-
-test('commit стримит дельты и отдаёт очищенный код, рассуждения не уходят', async () => {
-  await withServer({ ...COMMIT_OPTS, streamFn: fakeStream([
-    { type: 'thinking_delta', delta: 'сейчас подумаю' },
-    { type: 'text_delta', delta: '```js\ndocument' },
-    { type: 'text_delta', delta: '.title = "x"\n```' },
-    { type: 'done', reason: 'stop', message: {} },
-  ]) }, async base => {
-    const events = await readSse(await post(base, { model: MODEL_REF, diff: '#q  "" -> "привет"' }));
-    assert.equal(events.at(-1).event, 'done');
-    assert.equal(events.at(-1).data.code, 'document.title = "x"');
-    assert.equal(events.some(e => e.data.text === 'сейчас подумаю'), false);
+// Подставная сессия для тестов ниже: не ходит к настоящей модели, только
+// запоминает вызовы. Используется через opts.sessionFactory.
+function stubSession(calls, extra = {}) {
+  return async () => ({
+    session: {
+      prompt: async text => { calls.push(text); },
+      subscribe: () => () => {},
+      abort: async () => { calls.push('abort'); },
+      waitForIdle: async () => {},
+      dispose: () => {},
+      ...extra,
+    },
   });
-});
+}
 
-test('commit кладёт результат прошлого хода перед дифом', async () => {
-  await withServer({ ...COMMIT_OPTS, streamFn: fakeStream([
-    { type: 'text_delta', delta: 'x()' },
-    { type: 'done', reason: 'stop', message: {} },
-  ]) }, async (base, app) => {
-    await post(base, { model: MODEL_REF, diff: 'диф', result: '42' }).then(r => r.text());
-    assert.deepEqual(app.state.history.messages.map(m => m.content),
-      ['результат: 42', 'диф', [{ type: 'text', text: 'x()' }]]);
+// --- Задача 4: ход через сессию pi ---
+
+test('commit запускает ход и отдаёт поток', async () => {
+  const calls = [];
+  const app = createApp({
+    sessionFactory: async () => ({
+      session: {
+        prompt: async text => { calls.push(text); },
+        subscribe: () => () => {},
+        abort: async () => { calls.push('abort'); },
+        waitForIdle: async () => {},
+        dispose: () => {},
+      },
+    }),
   });
-});
-
-test('пустой ответ модели — законный ход: done с пустым кодом', async () => {
-  await withServer({ ...COMMIT_OPTS, streamFn: fakeStream([
-    { type: 'text_delta', delta: '<think>делать нечего</think>' },
-    { type: 'done', reason: 'stop', message: {} },
-  ]) }, async base => {
-    const events = await readSse(await post(base, { model: MODEL_REF, diff: 'д' }));
-    assert.equal(events.at(-1).event, 'done');
-    assert.equal(events.at(-1).data.code, '');
-  });
-});
-
-test('неизвестная модель даёт 400', async () => {
-  await withServer(COMMIT_OPTS, async base => {
-    assert.equal((await post(base, { model: { provider: 'нет', id: 'нет' }, diff: '' })).status, 400);
-  });
-});
-
-test('ошибка провайдера уходит событием error и не роняет сервер', async () => {
-  await withServer({ ...COMMIT_OPTS, streamFn: fakeStream([
-    { type: 'error', reason: 'error', error: { errorMessage: 'провайдер лёг' } },
-  ]) }, async base => {
-    const events = await readSse(await post(base, { model: MODEL_REF, diff: 'д' }));
-    assert.equal(events.at(-1).event, 'error');
-    assert.ok(events.at(-1).data.message.includes('провайдер лёг'));
-  });
-});
-
-// --- Дополнительно к плану ---
-
-test('секрет (baseUrl провайдера) не уходит в текст события error', async () => {
-  // baseUrl фикстуры — https://api.deepseek.com — попадает в config.secrets
-  // безусловно (pi-config.js), независимо от длины apiKey. Ошибка провайдера,
-  // случайно содержащая его в тексте, не должна долетать до браузера как есть.
-  await withServer({ ...COMMIT_OPTS, streamFn: fakeStream([
-    { type: 'error', reason: 'error', error: { errorMessage: 'запрос к https://api.deepseek.com/v1/chat не прошёл' } },
-  ]) }, async base => {
-    const events = await readSse(await post(base, { model: MODEL_REF, diff: 'д' }));
-    assert.equal(events.at(-1).event, 'error');
-    assert.equal(events.at(-1).data.message.includes('api.deepseek.com'), false);
-    assert.ok(events.at(-1).data.message.includes('***'));
-  });
-});
-
-test('автоповтор ровно один раз: два неразбираемых ответа подряд — провайдер вызван дважды, наружу error', async () => {
-  const streamFn = sequentialStream([
-    [{ type: 'text_delta', delta: BAD_TEXT }, { type: 'done', reason: 'stop', message: {} }],
-    [{ type: 'text_delta', delta: BAD_TEXT }, { type: 'done', reason: 'stop', message: {} }],
-  ]);
-  await withServer({ ...COMMIT_OPTS, streamFn }, async base => {
-    const events = await readSse(await post(base, { model: MODEL_REF, diff: 'д' }));
-    assert.equal(streamFn.calls.length, 2, 'провайдер должен быть вызван ровно дважды, не трижды');
-    assert.equal(events.at(-1).event, 'error');
-  });
-});
-
-test('успешный автоповтор: первый ответ мусорный, второй валидный — done со вторым, в истории обе попытки', async () => {
-  const streamFn = sequentialStream([
-    [{ type: 'text_delta', delta: BAD_TEXT }, { type: 'done', reason: 'stop', message: {} }],
-    [{ type: 'text_delta', delta: 'x()' }, { type: 'done', reason: 'stop', message: {} }],
-  ]);
-  await withServer({ ...COMMIT_OPTS, streamFn }, async (base, app) => {
-    const events = await readSse(await post(base, { model: MODEL_REF, diff: 'д' }));
-    assert.equal(streamFn.calls.length, 2);
-    assert.equal(events.at(-1).event, 'done');
-    assert.equal(events.at(-1).data.code, 'x()');
-    const assistantTexts = app.state.history.messages
-      .filter(m => m.role === 'assistant')
-      .map(m => m.content[0].text);
-    assert.deepEqual(assistantTexts, [BAD_TEXT, 'x()']);
-  });
-});
-
-test('история не растёт при 400 (неизвестная модель)', async () => {
-  await withServer(COMMIT_OPTS, async (base, app) => {
-    await post(base, { model: { provider: 'нет', id: 'нет' }, diff: 'д' });
-    assert.equal(app.state.history.messages.length, 0);
-  });
-});
-
-test('result не передан — сообщения "результат:" в истории нет', async () => {
-  await withServer({ ...COMMIT_OPTS, streamFn: fakeStream([
-    { type: 'text_delta', delta: 'x()' },
-    { type: 'done', reason: 'stop', message: {} },
-  ]) }, async (base, app) => {
-    await post(base, { model: MODEL_REF, diff: 'диф без result' }).then(r => r.text());
-    assert.equal(app.state.history.messages.some(m =>
-      typeof m.content === 'string' && m.content.startsWith('результат:')), false);
-    assert.equal(app.state.history.messages[0].content, 'диф без result');
-  });
-});
-
-test('/api/session отдаёт растущее число токенов после хода', async () => {
-  await withServer({ ...COMMIT_OPTS, streamFn: fakeStream([
-    { type: 'text_delta', delta: 'x()' },
-    { type: 'done', reason: 'stop', message: {} },
-  ]) }, async base => {
-    const before = (await (await fetch(base + '/api/session')).json()).tokens;
-    await post(base, { model: MODEL_REF, diff: 'диф побольше текста, чтобы токены точно выросли' })
-      .then(r => r.text());
-    const after = (await (await fetch(base + '/api/session')).json()).tokens;
-    assert.ok(after > before, `${after} должно быть больше ${before}`);
-  });
-});
-
-test('/api/abort без активного хода не падает и отдаёт ok', async () => {
-  await withServer(COMMIT_OPTS, async base => {
-    const res = await fetch(base + '/api/abort', { method: 'POST' });
+  await app.listen(0, 0);
+  try {
+    const res = await fetch(`http://127.0.0.1:${app.port}/api/commit`, {
+      method: 'POST', headers: { 'content-type': 'application/json' },
+      body: JSON.stringify({ diff: '#q  "" -> "привет"' }),
+    });
     assert.equal(res.status, 200);
-    assert.deepEqual(await res.json(), { ok: true });
+    await res.text();
+    assert.equal(calls[0], '#q  "" -> "привет"');
+  } finally { await app.close(); }
+});
+
+test('abort доходит до сессии', async () => {
+  const calls = [];
+  const app = createApp({
+    sessionFactory: async () => ({
+      session: { prompt: async () => {}, subscribe: () => () => {},
+        abort: async () => { calls.push('abort'); }, waitForIdle: async () => {}, dispose: () => {} },
+    }),
   });
+  await app.listen(0, 0);
+  try {
+    await fetch(`http://127.0.0.1:${app.port}/api/commit`, {
+      method: 'POST', headers: { 'content-type': 'application/json' },
+      body: JSON.stringify({ diff: 'д' }),
+    }).then(r => r.text());
+    await fetch(`http://127.0.0.1:${app.port}/api/abort`, { method: 'POST' });
+    assert.ok(calls.includes('abort'));
+  } finally { await app.close(); }
+});
+
+test('результат page_exec с чужим id отбрасывается, сервер жив', async () => {
+  const app = createApp({});
+  await app.listen(0, 0);
+  try {
+    const res = await fetch(`http://127.0.0.1:${app.port}/api/page-result`, {
+      method: 'POST', headers: { 'content-type': 'application/json' },
+      body: JSON.stringify({ id: 'нет-такого', ok: true, value: 'x' }),
+    });
+    assert.equal(res.status, 200);
+  } finally { await app.close(); }
+});
+
+test('page_exec от модели доходит до подписчика SSE и возвращается результатом', async () => {
+  let callPage = null;
+  const app = createApp({
+    sessionFactory: async ({ callPage: fn }) => {
+      callPage = fn;
+      return { session: { prompt: async () => {}, subscribe: () => () => {},
+        abort: async () => {}, waitForIdle: async () => {}, dispose: () => {} } };
+    },
+  });
+  await app.listen(0, 0);
+  try {
+    // подписываемся на события, как это делает оболочка
+    const es = await fetch(`http://127.0.0.1:${app.port}/api/events`);
+    const reader = es.body.getReader();
+    const dec = new TextDecoder();
+
+    // поднимаем сессию — она создаётся лениво при первом ходе
+    await fetch(`http://127.0.0.1:${app.port}/api/commit`, {
+      method: 'POST', headers: { 'content-type': 'application/json' },
+      body: JSON.stringify({ diff: 'д' }),
+    }).then(r => r.text());
+
+    const pending = callPage('return 2 + 2');
+    // читаем кадр с запросом
+    const chunk = dec.decode((await reader.read()).value);
+    const m = /"id":"(p\d+)"/.exec(chunk);
+    assert.ok(m, 'в потоке должен быть запрос page_exec с id: ' + chunk);
+
+    await fetch(`http://127.0.0.1:${app.port}/api/page-result`, {
+      method: 'POST', headers: { 'content-type': 'application/json' },
+      body: JSON.stringify({ id: m[1], ok: true, value: '4' }),
+    });
+    assert.deepEqual(await pending, { ok: true, value: '4' });
+    reader.cancel();
+  } finally { await app.close(); }
 });
 
 test('заголовки потока: /api/commit отвечает text/event-stream', async () => {
-  await withServer({ ...COMMIT_OPTS, streamFn: fakeStream([
-    { type: 'text_delta', delta: 'x()' },
-    { type: 'done', reason: 'stop', message: {} },
-  ]) }, async base => {
-    const res = await post(base, { model: MODEL_REF, diff: 'д' });
+  await withServer({ sessionFactory: stubSession([]) }, async base => {
+    const res = await post(base, { diff: 'д' });
     assert.match(res.headers.get('content-type'), /text\/event-stream/);
     await res.text();
   });
 });
 
 test('битое тело запроса не роняет сервер', async () => {
-  await withServer({ ...COMMIT_OPTS, streamFn: fakeStream([
-    { type: 'text_delta', delta: 'x()' },
-    { type: 'done', reason: 'stop', message: {} },
-  ]) }, async base => {
+  await withServer({ sessionFactory: stubSession([]) }, async base => {
     const bad = await fetch(base + '/api/commit', {
       method: 'POST', headers: { 'content-type': 'application/json' },
       body: 'это не json {{{',
     });
     assert.notEqual(bad.status, 200);
     // Сервер должен остаться живым — следующий нормальный запрос обязан пройти.
-    const ok = await post(base, { model: MODEL_REF, diff: 'д' });
+    const ok = await post(base, { diff: 'д' });
     assert.equal(ok.status, 200);
     await ok.text();
+  });
+});
+
+test('/api/abort без активного хода не падает и отдаёт ok', async () => {
+  await withServer({}, async base => {
+    const res = await fetch(base + '/api/abort', { method: 'POST' });
+    assert.equal(res.status, 200);
+    assert.deepEqual(await res.json(), { ok: true });
+  });
+});
+
+// --- Дополнительно к плану: устойчивость канала page_exec ---
+
+test('сессия не поднимается (нет модели/ключа) — commit отдаёт error-событие, сервер жив', async () => {
+  await withServer({
+    sessionFactory: async () => { throw new Error('нет доступной модели'); },
+  }, async base => {
+    const res = await post(base, { diff: 'д' });
+    assert.equal(res.status, 200);
+    assert.match(res.headers.get('content-type'), /text\/event-stream/);
+    const events = await readSse(res);
+    assert.equal(events.at(-1).event, 'error');
+    assert.ok(events.at(-1).data.message.includes('нет доступной модели'));
+
+    // сервер жив — обычный маршрут всё ещё отвечает
+    const alive = await fetch(base + '/api/abort', { method: 'POST' });
+    assert.equal(alive.status, 200);
+  });
+});
+
+test('оболочка отключилась посреди хода: вызов page_exec отклоняется, сервер жив', async () => {
+  let callPage = null;
+  await withServer({
+    sessionFactory: async ({ callPage: fn }) => {
+      callPage = fn;
+      return { session: { prompt: async () => {}, subscribe: () => () => {},
+        abort: async () => {}, waitForIdle: async () => {}, dispose: () => {} } };
+    },
+  }, async base => {
+    const ctrl = new AbortController();
+    await fetch(base + '/api/events', { signal: ctrl.signal });
+    await post(base, { diff: 'д' }).then(r => r.text()); // поднимает сессию
+
+    ctrl.abort(); // оболочка отключилась — единственный подписчик ушёл
+    await new Promise(r => setTimeout(r, 100)); // дать серверу обработать close
+
+    await assert.rejects(callPage('return 1'), /отключилась|не подключена/);
+
+    // сервер жив: обычный маршрут всё ещё отвечает
+    const alive = await fetch(base + '/api/abort', { method: 'POST' });
+    assert.equal(alive.status, 200);
+  });
+});
+
+test('два подписчика SSE: запрос уходит в оба, повторный ответ с тем же id не путает мост', async () => {
+  let callPage = null;
+  await withServer({
+    sessionFactory: async ({ callPage: fn }) => {
+      callPage = fn;
+      return { session: { prompt: async () => {}, subscribe: () => () => {},
+        abort: async () => {}, waitForIdle: async () => {}, dispose: () => {} } };
+    },
+  }, async base => {
+    const es1 = await fetch(base + '/api/events');
+    const es2 = await fetch(base + '/api/events');
+    const r1 = es1.body.getReader();
+    const r2 = es2.body.getReader();
+    const dec = new TextDecoder();
+
+    await post(base, { diff: 'д' }).then(r => r.text());
+
+    const pending = callPage('return 1 + 1');
+    const id1 = /"id":"(p\d+)"/.exec(dec.decode((await r1.read()).value))?.[1];
+    const id2 = /"id":"(p\d+)"/.exec(dec.decode((await r2.read()).value))?.[1];
+    assert.ok(id1, 'первый подписчик должен получить запрос page_exec');
+    assert.equal(id1, id2, 'оба подписчика получают один и тот же запрос с одним id');
+
+    await fetch(base + '/api/page-result', {
+      method: 'POST', headers: { 'content-type': 'application/json' },
+      body: JSON.stringify({ id: id1, ok: true, value: '2' }),
+    });
+    // запоздавший ответ второго подписчика с тем же id — сервер не должен споткнуться
+    const dup = await fetch(base + '/api/page-result', {
+      method: 'POST', headers: { 'content-type': 'application/json' },
+      body: JSON.stringify({ id: id1, ok: true, value: 'другой ответ' }),
+    });
+    assert.equal(dup.status, 200);
+    assert.deepEqual(await pending, { ok: true, value: '2' });
+
+    r1.cancel(); r2.cancel();
+  });
+});
+
+test('переподключение оболочки восстанавливает канал page_exec', async () => {
+  let callPage = null;
+  await withServer({
+    sessionFactory: async ({ callPage: fn }) => {
+      callPage = fn;
+      return { session: { prompt: async () => {}, subscribe: () => () => {},
+        abort: async () => {}, waitForIdle: async () => {}, dispose: () => {} } };
+    },
+  }, async base => {
+    await post(base, { diff: 'д' }).then(r => r.text()); // поднимает сессию
+
+    const ctrl = new AbortController();
+    await fetch(base + '/api/events', { signal: ctrl.signal });
+    ctrl.abort();
+    await new Promise(r => setTimeout(r, 100));
+    await assert.rejects(callPage('a'), /отключилась|не подключена/);
+
+    // переподключение — новый SSE-запрос должен снова принимать запросы
+    const es2 = await fetch(base + '/api/events');
+    const reader = es2.body.getReader();
+    const dec = new TextDecoder();
+    const pending = callPage('return 3');
+    const m = /"id":"(p\d+)"/.exec(dec.decode((await reader.read()).value));
+    assert.ok(m, 'после переподключения сервер снова должен слать запросы в SSE');
+
+    await fetch(base + '/api/page-result', {
+      method: 'POST', headers: { 'content-type': 'application/json' },
+      body: JSON.stringify({ id: m[1], ok: true, value: '3' }),
+    });
+    assert.deepEqual(await pending, { ok: true, value: '3' });
+    reader.cancel();
   });
 });
 
@@ -481,40 +537,6 @@ test('выход за пределы web/ запрещён: обходы чер�
         assert.equal(body.includes(PACKAGE_JSON_NEEDLE), false, `${target} не должен отдать содержимое package.json`);
       }
     });
-  });
-});
-
-test('модель встроенного провайдера уходит через его собственный поток', async () => {
-  let usedBuiltin = false;
-  const provider = { name: 'vstroennyy', apiKey: 'kluch', builtin: true,
-    baseUrl: 'https://primer', streamFn: () => { usedBuiltin = true; return fakeStream([
-      { type: 'text_delta', delta: 'x()' },
-      { type: 'done', reason: 'stop', message: {} },
-    ])(); } };
-  const model = { provider: 'vstroennyy', id: 'm', api: 'openai-responses', maxTokens: 16 };
-
-  const app = createApp({ configPath: '/нет', authPath: '/нет', settingsPath: '/нет' });
-  app.state.config = { models: [model], providers: [provider], notes: [], secrets: new Set(),
-    default: null, error: null };
-  await app.listen(0, 0);
-  try {
-    const events = await readSse(await fetch(`http://127.0.0.1:${app.port}/api/commit`, {
-      method: 'POST', headers: { 'content-type': 'application/json' },
-      body: JSON.stringify({ model: { provider: 'vstroennyy', id: 'm' }, diff: 'д' }),
-    }));
-    assert.equal(usedBuiltin, true, 'должен был использоваться streamFn провайдера');
-    assert.equal(events.at(-1).event, 'done');
-    assert.equal(events.at(-1).data.code, 'x()');
-  } finally { await app.close(); }
-});
-
-test('пользовательская модель по-прежнему идёт через адаптер по api', async () => {
-  await withServer({ ...COMMIT_OPTS, streamFn: fakeStream([
-    { type: 'text_delta', delta: 'y()' },
-    { type: 'done', reason: 'stop', message: {} },
-  ]) }, async base => {
-    const events = await readSse(await post(base, { model: MODEL_REF, diff: 'д' }));
-    assert.equal(events.at(-1).data.code, 'y()');
   });
 });
 

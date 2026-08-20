@@ -7,6 +7,8 @@ import { stream as openaiStream } from '@earendil-works/pi-ai/api/openai-complet
 import { stream as anthropicStream } from '@earendil-works/pi-ai/api/anthropic-messages';
 import { extractCode, checkParsable } from './parse.js';
 import { createHistory, SYSTEM_PROMPT } from './context.js';
+import { createBridge } from './bridge.js';
+import { startSession } from './agent.js';
 
 const DEFAULT_WEB_ROOT = fileURLToPath(new URL('../web/', import.meta.url));
 
@@ -74,8 +76,29 @@ async function serveStatic(res, pathname, root) {
 }
 
 export function createApp(opts = {}) {
-  const state = { config: null, opts, history: createHistory(), abort: null };
+  const state = { config: null, opts, history: createHistory(), abort: null, session: null };
   const root = withTrailingSlash(opts.webRoot ?? DEFAULT_WEB_ROOT);
+
+  const bridge = createBridge({ send: null });
+  const listeners = new Set();
+
+  // Оболочка держит открытый SSE; по нему сервер шлёт запросы page_exec и
+  // события сессии. Обратный ход — обычным POST: WebSocket-сервера в Node нет,
+  // а тянуть ws ради одного канала не стоит.
+  function broadcast(event, data) {
+    for (const res of listeners) {
+      try { sse(res, event, data); } catch { listeners.delete(res); }
+    }
+  }
+
+  async function ensureSession() {
+    if (state.session) return state.session;
+    const factory = opts.sessionFactory ?? startSession;
+    const { session } = await factory({ callPage: code => bridge.call(code) });
+    state.session = session;
+    session.subscribe(ev => { if (ev?.type) broadcast('agent', { type: ev.type }); });
+    return session;
+  }
 
   async function reload() {
     state.config = await loadConfig({
@@ -114,42 +137,23 @@ export function createApp(opts = {}) {
 
   async function handleCommit(req, res) {
     const body = await readJson(req);
-    const c = state.config ?? await reload();
-    const model = c.models.find(m => m.provider === body.model?.provider && m.id === body.model?.id);
-    if (!model) return json(res, 400, { error: 'модель не найдена' });
-    const provider = c.providers.find(p => p.name === model.provider);
-
     res.writeHead(200, {
       'content-type': 'text/event-stream; charset=utf-8',
       'cache-control': 'no-cache',
       connection: 'keep-alive',
     });
-
-    state.history.pushResult(body.result);
-    state.history.pushDiff(body.diff);
-
-    const ctl = new AbortController();
-    state.abort = ctl;
+    // ensureSession() — внутри try, а не до writeHead: если сессия не поднимается
+    // (нет модели, нет ключа), это должно уйти событием error внутри уже начатого
+    // потока, а не сорвать ответ обратно в JSON 500 из внешнего catch — оболочка
+    // ждёт именно SSE на этом маршруте.
     try {
-      let code = extractCode(await collect(model, provider, ctl.signal, res));
-      let check = checkParsable(code);
-      if (!check.ok) {
-        // §7 спецификации: ровно один автоповтор с текстом ошибки
-        state.history.pushCode(code, model);
-        state.history.pushDiff('код не разобрался: ' + check.error +
-          '\nпришли только исполнимый JavaScript');
-        code = extractCode(await collect(model, provider, ctl.signal, res));
-        check = checkParsable(code);
-      }
-      if (!check.ok) sse(res, 'error', { message: 'код не разбирается: ' + check.error });
-      else {
-        state.history.pushCode(code, model);
-        sse(res, 'done', { code });
-      }
+      const session = await ensureSession();
+      await session.prompt(String(body.diff ?? ''));
+      await session.waitForIdle();
+      sse(res, 'done', {});
     } catch (e) {
-      sse(res, 'error', { message: scrub(e.message, c.secrets) });
+      sse(res, 'error', { message: String(e.message) });
     } finally {
-      state.abort = null;
       res.end();
     }
   }
@@ -185,12 +189,43 @@ export function createApp(opts = {}) {
       }
       if (url.pathname === '/api/commit' && req.method === 'POST') return await handleCommit(req, res);
       if (url.pathname === '/api/abort' && req.method === 'POST') {
-        state.abort?.abort();
+        if (state.session) await state.session.abort();
         return json(res, 200, { ok: true });
       }
       if (url.pathname === '/api/session') return json(res, 200, { tokens: state.history.size() });
       if (url.pathname === '/api/config') {
         return json(res, 200, { imageOrigin: `http://127.0.0.1:${imageServer.address()?.port}` });
+      }
+      if (url.pathname === '/api/events') {
+        res.writeHead(200, {
+          'content-type': 'text/event-stream; charset=utf-8',
+          'cache-control': 'no-cache',
+          connection: 'keep-alive',
+        });
+        // writeHead() сам по себе ничего не отправляет в сокет — Node копит
+        // заголовки до первого write()/end(). Здесь до первого события может
+        // пройти сколько угодно времени (страница ждёт запроса page_exec),
+        // так что без явного flushHeaders() клиент завис бы в ожидании самого
+        // статуса ответа, а не только данных.
+        res.flushHeaders();
+        listeners.add(res);
+        // Каждое новое подключение переустанавливает отправителя моста — это и
+        // есть восстановление канала после переподключения оболочки (п.3
+        // «Дополнительно к плану»): пока хотя бы один слушатель жив, мост может
+        // слать запросы; на закрытии последнего — немеет и отклоняет ожидающих.
+        bridge.setSender(m => broadcast('page_exec', m));
+        req.on('close', () => {
+          listeners.delete(res);
+          if (listeners.size === 0) {
+            bridge.setSender(null);
+            bridge.reset('оболочка отключилась');
+          }
+        });
+        return;
+      }
+      if (url.pathname === '/api/page-result' && req.method === 'POST') {
+        bridge.deliver(await readJson(req));
+        return json(res, 200, { ok: true });
       }
       if (url.pathname.startsWith('/api/')) return json(res, 404, { error: 'нет такого метода' });
       return await serveStatic(res, url.pathname, root);

@@ -6,7 +6,6 @@ const log = document.getElementById('log');
 
 let seq = 0;
 const pending = new Map();
-let lastResult;
 let imageAllowedOrigin = null;
 
 const say = t => { log.textContent = t; };
@@ -46,6 +45,27 @@ async function boot() {
   const { imageOrigin } = await fetch('api/config').then(r => r.json());
   imageAllowedOrigin = imageOrigin;
   frame.src = imageOrigin + '/image.html';
+}
+
+// Постоянный канал вниз: сервер сам инициирует page_exec посреди хода.
+function listen() {
+  const es = new EventSource('api/events');
+  es.addEventListener('page_exec', async e => {
+    const { id, code } = JSON.parse(e.data);
+    let out;
+    try {
+      const r = await ask({ type: 'exec', code });
+      out = { id, ok: r.ok, value: r.value, error: r.error };
+    } catch (err) {
+      out = { id, ok: false, error: String(err.message) };
+    }
+    fetch('api/page-result', {
+      method: 'POST', headers: { 'content-type': 'application/json' },
+      body: JSON.stringify(out),
+    });
+  });
+  es.addEventListener('agent', e => { setState(JSON.parse(e.data).type ?? 'думает'); });
+  es.onerror = () => setState('связь потеряна');
 }
 
 async function loadModels() {
@@ -115,52 +135,22 @@ async function readStream(res, onDelta) {
 async function commit() {
   // Горячая клавиша не знает про disabled кнопки — без этой проверки
   // Cmd/Ctrl+Enter во время уже идущего хода запускает второй commit()
-  // поверх первого: оба читают/пишут один и тот же lastResult и общую
-  // историю сервера, и как раз тот инвариант "результат уезжает ровно
-  // один раз", который мы защищаем, ломается гонкой.
+  // поверх первого хода.
   if (sendBtn.disabled) return;
-  if (!modelSel.value) { say('нет доступных моделей — проверьте models.json'); return; }
   sendBtn.disabled = true;
   try {
     const { text: diff } = await ask({ type: 'diff' });
-    const [provider, id] = modelSel.value.split(' ');
     setState('думает');
-    let shown = '';
     const res = await fetch('api/commit', {
       method: 'POST',
       headers: { 'content-type': 'application/json' },
-      body: JSON.stringify({ model: { provider, id }, diff, result: lastResult }),
+      body: JSON.stringify({ diff }),
     });
-    // С этой точки запрос точно дошёл до сервера: pushResult/pushDiff там
-    // выполняются синхронно ДО того, как уйдут заголовки ответа — то есть
-    // раньше, чем к нам сюда вернётся управление из await fetch. Значит
-    // lastResult уже лёг в историю сервера независимо от того, как сложится
-    // поток дальше (в том числе если он оборвётся с ошибкой) — и его нельзя
-    // послать повторно при следующем ходе. Сбрасываем сразу, а не после
-    // чтения потока и не после exec.
-    lastResult = undefined;
-    if (!res.ok) {
-      const body = await res.json().catch(() => ({}));
-      throw new Error(body.error || ('сервер ответил ' + res.status));
-    }
-    const code = await readStream(res, d => { shown += d; say(shown); });
-    if (!code) { say('пустой ответ — ход засчитан, образ не тронут'); setState('свободна'); return; }
-    const r = await ask({ type: 'exec', code });
-    if (r.ok) {
-      // Успешный exec даёт новое значение — оно уедет ровно на следующем
-      // ходу (лежит в lastResult только с этого момента и до следующего
-      // commit(), где снова будет сброшено сразу после отправки).
-      lastResult = r.value;
-      say(code);
-      setState('свободна');
-    } else {
-      // Ошибка exec: lastResult уже undefined (сброшен выше, до exec), и
-      // трогать его тут не нужно — значение, из-за которого код бросил,
-      // никогда не было получено (fn бросила раньше return), докладывать
-      // на следующем ходу нечего.
-      say('ошибка исполнения:\n' + r.error);
-      setState('ошибка');
-    }
+    // Модель больше не возвращает код в ответе на commit — она сама зовёт
+    // page_exec посреди хода через постоянный канал listen(). Здесь просто
+    // дожидаемся конца потока (done/error).
+    await readStream(res, () => {});
+    setState('свободна');
   } catch (e) {
     say(String(e.message));
     setState('ошибка');
@@ -175,4 +165,5 @@ addEventListener('keydown', e => {
 });
 
 await boot();
+listen();
 await loadModels();
