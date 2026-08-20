@@ -189,6 +189,9 @@ export function createApp(opts = {}) {
         return json(res, 200, { ok: true });
       }
       if (url.pathname === '/api/session') return json(res, 200, { tokens: state.history.size() });
+      if (url.pathname === '/api/config') {
+        return json(res, 200, { imageOrigin: `http://127.0.0.1:${imageServer.address()?.port}` });
+      }
       if (url.pathname.startsWith('/api/')) return json(res, 404, { error: 'нет такого метода' });
       return await serveStatic(res, url.pathname, root);
     } catch (e) {
@@ -202,26 +205,52 @@ export function createApp(opts = {}) {
     }
   });
 
+  // Образ живёт на отдельном порту, и это весь механизм изоляции: другой
+  // origin даёт ему localStorage и остальной HTML5, но не даёт достать до
+  // оболочки. Атрибут sandbox не используется — он дал бы меньше и хуже.
+  const imageServer = createServer(async (req, res) => {
+    let url;
+    try { url = new URL(req.url, 'http://127.0.0.1'); }
+    catch {
+      if (res.headersSent) return res.destroy();
+      return json(res, 400, { error: 'некорректный запрос' });
+    }
+    const p = imageServer.address()?.port;
+    const allowed = new Set([`127.0.0.1:${p}`, `localhost:${p}`]);
+    if (!allowed.has(String(req.headers.host).toLowerCase())) {
+      return json(res, 403, { error: 'недопустимый Host' });
+    }
+    const path = url.pathname === '/' ? '/image.html' : url.pathname;
+    // `root` — уже вычисленная в createApp константа с завершающим слэшем,
+    // а не сырой opts.webRoot: на слэше держится проверка startsWith.
+    return await serveStatic(res, path, root);
+  });
+
   return {
-    server, reload, state,
+    server, imageServer, reload, state,
     get port() { return server.address()?.port; },
-    listen(port = 8730) {
-      return new Promise((resolve, reject) => {
-        server.once('error', reject);
-        server.listen(port, '127.0.0.1', () => {
-          server.removeListener('error', reject);
-          resolve();
-        });
+    get imagePort() { return imageServer.address()?.port; },
+    listen(port = 8730, imgPort = 8731) {
+      const up = (srv, p) => new Promise((resolve, reject) => {
+        const onError = e => reject(e);
+        srv.once('error', onError);
+        srv.listen(p, '127.0.0.1', () => { srv.removeListener('error', onError); resolve(); });
       });
+      return Promise.all([up(server, port), up(imageServer, imgPort)]);
     },
-    close() { return new Promise(r => server.close(r)); },
+    close() {
+      return Promise.all([
+        new Promise(r => server.close(r)),
+        new Promise(r => imageServer.close(r)),
+      ]);
+    },
   };
 }
 
 if (fileURLToPath(import.meta.url) === process.argv[1]) {
   const flag = process.argv.indexOf('--pi-config');
   const app = createApp({ configPath: flag > -1 ? process.argv[flag + 1] : process.env.PI_MODELS_PATH });
-  await app.listen(8730);
+  await app.listen(8730, 8731);
   process.on('SIGHUP', () => { app.reload(); });
-  console.log('dom-agent слушает http://127.0.0.1:8730');
+  console.log('dom-agent слушает http://127.0.0.1:8730, образ — http://127.0.0.1:8731');
 }

@@ -7,17 +7,19 @@ const log = document.getElementById('log');
 let seq = 0;
 const pending = new Map();
 let lastResult;
+let imageAllowedOrigin = null;
 
 const say = t => { log.textContent = t; };
 const setState = s => { dot.textContent = s; };
 
-// Единственная валидная проверка отправителя: у sandbox-фрейма event.origin
-// всегда "null", сравнивать его бессмысленно. event.source — это конкретный
-// window, который прислал сообщение; код модели способен сам вызвать
-// parent.postMessage и подсунуть незапрошенный текст под видом ответа на
-// наш запрос, поэтому сверяем ещё и id с картой ожидающих запросов.
+// event.source — это конкретный window, который прислал сообщение; код
+// модели способен сам вызвать parent.postMessage и подсунуть незапрошенный
+// текст под видом ответа на наш запрос, поэтому сверяем ещё и id с картой
+// ожидающих запросов. Теперь origin — настоящее значение, а не "null": образ
+// живёт на своём порту, поэтому проверка стала осмысленной и добавлена рядом.
 addEventListener('message', e => {
   if (e.source !== frame.contentWindow) return;
+  if (imageAllowedOrigin && e.origin !== imageAllowedOrigin) return;
   const m = e.data;
   if (!m || typeof m !== 'object') return;
   if (m.type === 'ready') { setState('свободна'); return; }
@@ -36,17 +38,14 @@ function ask(msg, timeout = 5000) {
       reject(new Error('образ не ответил за ' + timeout + ' мс'));
     }, timeout);
     pending.set(id, { resolve, timer });
-    frame.contentWindow.postMessage({ ...msg, id }, '*');
+    frame.contentWindow.postMessage({ ...msg, id }, imageAllowedOrigin ?? '*');
   });
 }
 
 async function boot() {
-  const [seed, bootJs] = await Promise.all([
-    fetch('seed.html').then(r => r.text()),
-    fetch('image-boot.js').then(r => r.text()),
-  ]);
-  const call = 'createImage(document, m => parent.postMessage(m, "*")).install();';
-  frame.srcdoc = seed + '<scr' + 'ipt>' + bootJs + '\n' + call + '</scr' + 'ipt>';
+  const { imageOrigin } = await fetch('api/config').then(r => r.json());
+  imageAllowedOrigin = imageOrigin;
+  frame.src = imageOrigin + '/image.html';
 }
 
 async function loadModels() {

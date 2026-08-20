@@ -12,7 +12,7 @@ const PACKAGE_JSON_NEEDLE = '"name": "dom-agent"';
 
 async function withServer(opts, fn) {
   const app = createApp(opts);
-  await app.listen(0);
+  await app.listen(0, 0);
   try { await fn(`http://127.0.0.1:${app.port}`, app); } finally { await app.close(); }
 }
 
@@ -162,14 +162,20 @@ test('второй listen() на занятый порт отклоняется,
     const app1 = createApp(opts);
     const app2 = createApp(opts);
     try {
-      await app1.listen(0);
-      await assert.rejects(() => app2.listen(app1.port), e => e.code === 'EADDRINUSE');
+      await app1.listen(0, 0);
+      // imgPort у app2 — тоже 0 (а не занятый app1.imagePort и не дефолтный
+      // 8731): иначе успешный bind второго порта app2 остался бы висеть
+      // непойманным сокетом до конца прогона тестов — assert.rejects ловит
+      // отказ Promise.all по первому упавшему промису, но не отменяет и не
+      // закрывает уже поднявшийся сосед.
+      await assert.rejects(() => app2.listen(app1.port, 0), e => e.code === 'EADDRINUSE');
       // До фикса необработанное 'error'-событие на сервере убивало весь процесс
       // node --test (а не только эту проверку) — здесь просто убеждаемся, что
       // app1 как ни в чём не бывало продолжает отвечать.
       const res = await fetch(`http://127.0.0.1:${app1.port}/api/models`);
       assert.equal(res.status, 200);
     } finally {
+      await app2.close();
       await app1.close();
     }
   });
@@ -490,7 +496,7 @@ test('модель встроенного провайдера уходит че
   const app = createApp({ configPath: '/нет', authPath: '/нет', settingsPath: '/нет' });
   app.state.config = { models: [model], providers: [provider], notes: [], secrets: new Set(),
     default: null, error: null };
-  await app.listen(0);
+  await app.listen(0, 0);
   try {
     const events = await readSse(await fetch(`http://127.0.0.1:${app.port}/api/commit`, {
       method: 'POST', headers: { 'content-type': 'application/json' },
@@ -516,9 +522,72 @@ test('GET /api/models отдаёт умолчание', async () => {
   const app = createApp({ configPath: '/нет', authPath: '/нет', settingsPath: '/нет' });
   app.state.config = { models: [], providers: [], notes: [], secrets: new Set(),
     error: null, default: { provider: 'deepseek', id: 'deepseek-v4-pro' } };
-  await app.listen(0);
+  await app.listen(0, 0);
   try {
     const body = await (await fetch(`http://127.0.0.1:${app.port}/api/models`)).json();
     assert.deepEqual(body.default, { provider: 'deepseek', id: 'deepseek-v4-pro' });
+  } finally { await app.close(); }
+});
+
+// --- Задача 3: образ на своём origin ---
+
+test('образ отдаётся со второго порта', async () => {
+  const app = createApp({ configPath: '/нет', authPath: '/нет', settingsPath: '/нет' });
+  await app.listen(0, 0);
+  try {
+    assert.notEqual(app.port, app.imagePort);
+    const res = await fetch(`http://127.0.0.1:${app.imagePort}/image.html`);
+    assert.equal(res.status, 200);
+    const html = await res.text();
+    assert.ok(html.includes('id="q"'), 'заготовка на месте');
+    assert.ok(html.includes('image-boot.js'), 'загрузчик подключён');
+    assert.equal(html.includes('sandbox'), false, 'атрибут sandbox не используется');
+  } finally { await app.close(); }
+});
+
+test('/api/config отдаёт origin образа', async () => {
+  const app = createApp({ configPath: '/нет', authPath: '/нет', settingsPath: '/нет' });
+  await app.listen(0, 0);
+  try {
+    const body = await (await fetch(`http://127.0.0.1:${app.port}/api/config`)).json();
+    assert.equal(body.imageOrigin, `http://127.0.0.1:${app.imagePort}`);
+  } finally { await app.close(); }
+});
+
+test('порт образа проверяет Host так же, как оболочка', async () => {
+  // fetch() не даёт подменить заголовок Host — undici (как и браузерный fetch)
+  // считает его запрещённым и молча шлёт настоящий адрес вместо заданного
+  // (проверено: с headers:{host:'evil.example'} на сервер всё равно приходит
+  // 127.0.0.1:port). Ровно поэтому в проверке Host у оболочки уже используется
+  // rawRequest — тот же приём нужен и здесь.
+  const app = createApp({ configPath: '/нет', authPath: '/нет', settingsPath: '/нет' });
+  await app.listen(0, 0);
+  try {
+    const bad = await rawRequest(app.imagePort, '/image.html', { host: 'evil.example' });
+    assert.equal(bad.status, 403);
+    const good = await rawRequest(app.imagePort, '/image.html');
+    assert.equal(good.status, 200);
+  } finally { await app.close(); }
+});
+
+test('image-boot.js отдаётся со второго порта', async () => {
+  const app = createApp({ configPath: '/нет', authPath: '/нет', settingsPath: '/нет' });
+  await app.listen(0, 0);
+  try {
+    const res = await fetch(`http://127.0.0.1:${app.imagePort}/image-boot.js`);
+    assert.equal(res.status, 200);
+    assert.match(res.headers.get('content-type'), /javascript/);
+    assert.match(await res.text(), /function createImage/);
+  } finally { await app.close(); }
+});
+
+test('на порту образа "/" отдаёт image.html с правильным content-type', async () => {
+  const app = createApp({ configPath: '/нет', authPath: '/нет', settingsPath: '/нет' });
+  await app.listen(0, 0);
+  try {
+    const res = await fetch(`http://127.0.0.1:${app.imagePort}/`);
+    assert.equal(res.status, 200);
+    assert.equal(res.headers.get('content-type'), 'text/html; charset=utf-8');
+    assert.match(await res.text(), /id="q"/);
   } finally { await app.close(); }
 });
