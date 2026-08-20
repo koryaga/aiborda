@@ -72,6 +72,14 @@ function createImage(doc, send, opts) {
     return path(p) + ' > ' + n.tagName.toLowerCase() + ':nth-child(' + i + ')';
   }
 
+  // Текстовый узел из одних пробелов — это форматирование разметки, а не
+  // намерение человека. На реальных дифах такие строки составляли 22%:
+  // «добавлен в html > body:nth-child(2): "\n\n"» приходило в каждом первом
+  // ходе сессии. Сигнал от этого только тонет.
+  function isBlankText(n) {
+    return n && n.nodeType === 3 && !String(n.data ?? '').trim();
+  }
+
   function serialize(n) {
     if (n.nodeType === 3) return JSON.stringify(n.data);
     // I7: строка дифа — одна строка. Схлопываем только переносы (и пробелы
@@ -230,14 +238,18 @@ function createImage(doc, send, opts) {
       if (!node.isConnected || insideAdded(node) || !entry.hasHuman) continue;
       const now = entry.override !== undefined ? entry.override : node.data;
       if (entry.old === now) continue;
+      // Только если пробелы с обеих сторон: "\n " -> "привет" — настоящая правка.
+      if (!String(entry.old ?? '').trim() && !String(now ?? '').trim()) continue;
       lines.push(path(node) + '  текст: ' + JSON.stringify(entry.old) + ' -> ' + JSON.stringify(now));
     }
     for (const item of removed) {
       if (item.node.isConnected || addedNodes.has(item.node)) continue;
+      if (isBlankText(item.node)) continue;
       lines.push('удалён из ' + path(item.parent) + ': ' + serialize(item.node));
     }
     for (const [node, parent] of added) {
       if (!node.isConnected) continue;
+      if (isBlankText(node)) continue;
       lines.push('добавлен в ' + path(parent) + ': ' + serialize(node));
     }
 

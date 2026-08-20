@@ -389,3 +389,54 @@ test('M10: только что добавленный узел с атрибут
   await tick();
   assert.equal(img.buildDiff(), 'добавлен в #items: <li class="x">новый</li>');
 });
+
+test('добавленный пробельный текстовый узел в диф не идёт', async () => {
+  const { doc, img } = makeImage('<div id="out"></div>');
+  doc.querySelector('#out').append(doc.createTextNode('\n   '));
+  await tick();
+  assert.equal(img.buildDiff(), '');
+});
+
+test('удалённый пробельный текстовый узел в диф не идёт', async () => {
+  const { doc, img } = makeImage('<div id="out">\n  <span>x</span>\n</div>');
+  const out = doc.querySelector('#out');
+  const blank = [...out.childNodes].find(n => n.nodeType === 3 && !n.data.trim());
+  blank.remove();
+  await tick();
+  assert.equal(img.buildDiff(), '');
+});
+
+test('осмысленный текст рядом с пробельным всё равно виден', async () => {
+  const { doc, img } = makeImage('<div id="out"></div>');
+  const out = doc.querySelector('#out');
+  out.append(doc.createTextNode('\n  '));
+  out.append(doc.createTextNode('важное'));
+  await tick();
+  const d = img.buildDiff();
+  assert.equal(d.split('\n').length, 1, 'должна остаться одна строка: ' + d);
+  assert.ok(d.includes('важное'));
+});
+
+test('правка пробелов на пробелы не идёт, а на текст — идёт', async () => {
+  const { doc, img } = makeImage('<div id="out">\n  <span>x</span></div>');
+  const blank = [...doc.querySelector('#out').childNodes].find(n => n.nodeType === 3);
+  blank.data = '\n      ';
+  await tick();
+  assert.equal(img.buildDiff(), '', 'пробелы на пробелы — форматирование');
+
+  blank.data = 'теперь текст';
+  await tick();
+  assert.ok(img.buildDiff().includes('теперь текст'), 'пробелы на текст — правка');
+});
+
+test('пробельный узел внутри добавленного поддерева не даёт лишних строк', async () => {
+  const { doc, img } = makeImage('<ul id="items"></ul>');
+  const li = doc.createElement('li');
+  li.append(doc.createTextNode('\n  '));
+  li.append(doc.createTextNode('пункт'));
+  doc.querySelector('#items').append(li);
+  await tick();
+  const d = img.buildDiff();
+  assert.equal(d.split('\n').length, 1, 'одно добавление, а не три: ' + d);
+  assert.ok(d.startsWith('добавлен в #items'));
+});
