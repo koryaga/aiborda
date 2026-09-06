@@ -102,6 +102,10 @@ export function createApp(opts = {}) {
     const factory = opts.sessionFactory ?? startSession;
     const { session } = await factory({ callPage: code => bridge.call(code) });
     state.session = session;
+    // Модель уже выбрана внутри createAgentSession().  Это не сопровождается
+    // событием model_select, поэтому сами публикуем начальное значение: иначе
+    // оболочка, успевшая прочитать /api/config до warmup(), навсегда покажет «—».
+    broadcast('model', modelRef());
     session.subscribe(ev => {
       if (!ev?.type) return;
       broadcast('agent', { type: ev.type });
@@ -177,6 +181,10 @@ export function createApp(opts = {}) {
         // статуса ответа, а не только данных.
         res.flushHeaders();
         listeners.add(res);
+        // SSE подключается после первого /api/config. Если warmup успел
+        // завершиться между этими двумя запросами, начальное broadcast выше
+        // уже прошло без слушателей; снапшот закрывает это окно гонки.
+        if (state.session) sse(res, 'model', modelRef());
         // Каждое новое подключение переустанавливает отправителя моста — это и
         // есть восстановление канала после переподключения оболочки (п.3
         // «Дополнительно к плану»): пока хотя бы один слушатель жив, мост может
