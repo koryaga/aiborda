@@ -9,31 +9,32 @@ const pending = new Map();
 let imageAllowedOrigin = null;
 
 const say = t => { log.textContent = t; };
-// Три состояния вместо сырых имён событий сессии: человеку нужен факт
-// «идёт / не идёт», а не turn_start и message_update.
-const STATES = { idle: 'свободна', busy: 'идёт ход', error: 'ошибка' };
+// Three states instead of raw session event names: a human needs the fact
+// "running / not running", not turn_start and message_update.
+const STATES = { idle: 'idle', busy: 'turn in progress', error: 'error' };
 const setState = s => {
   dot.dataset.state = s;
   dot.setAttribute('aria-label', STATES[s] ?? s);
 };
 
-// event.source — это конкретный window, который прислал сообщение; код
-// модели способен сам вызвать parent.postMessage и подсунуть незапрошенный
-// текст под видом ответа на наш запрос, поэтому сверяем ещё и id с картой
-// ожидающих запросов. Теперь origin — настоящее значение, а не "null": образ
-// живёт на своём порту, поэтому проверка стала осмысленной и добавлена рядом.
+// event.source is the specific window that sent the message; the model's code
+// can call parent.postMessage itself and slip in unsolicited text disguised as
+// a reply to our request, so we also check the id against the map of pending
+// requests. The origin is now a real value rather than "null" — the image lives
+// on its own port — so that check became meaningful and was added alongside.
 addEventListener('message', e => {
   if (e.source !== frame.contentWindow) return;
   if (imageAllowedOrigin && e.origin !== imageAllowedOrigin) return;
   const m = e.data;
   if (!m || typeof m !== 'object') return;
   if (m.type === 'ready') { setState('idle'); return; }
-  // Человек нажал Ctrl/Cmd+Enter внутри образа. Образ фильтрует синтетические
-  // события, но подделать это сообщение напрямую код модели всё же может —
-  // ущерб ограничен: во время хода commit() выходит сразу, а диф будет пуст.
+  // The human pressed Ctrl/Cmd+Enter inside the image. The image filters out
+  // synthetic events, but the model's code can still forge this message
+  // directly — the damage is limited: during a turn commit() returns
+  // immediately, and the diff would be empty anyway.
   if (m.type === 'commit') { commit(); return; }
   const p = pending.get(m.id);
-  if (!p) { say('незапрошенное сообщение от образа отброшено'); return; }
+  if (!p) { say('dropped an unsolicited message from the image'); return; }
   pending.delete(m.id);
   clearTimeout(p.timer);
   p.resolve(m);
@@ -44,14 +45,14 @@ function ask(msg, timeout = 5000) {
   return new Promise((resolve, reject) => {
     const timer = setTimeout(() => {
       pending.delete(id);
-      reject(new Error('образ не ответил за ' + timeout + ' мс'));
+      reject(new Error('the image did not answer within ' + timeout + ' ms'));
     }, timeout);
     pending.set(id, { resolve, timer });
     frame.contentWindow.postMessage({ ...msg, id }, imageAllowedOrigin ?? '*');
   });
 }
 
-// Модель ведёт pi, у нас её не выбирают — только показываем.
+// pi owns the model; we do not pick it here, we only display it.
 function showModel(m) {
   modelLabel.textContent = m ? m.provider + ' / ' + m.id : '—';
 }
@@ -63,7 +64,8 @@ async function boot() {
   frame.src = imageOrigin + '/image.html';
 }
 
-// Постоянный канал вниз: сервер сам инициирует page_exec посреди хода.
+// Persistent downstream channel: the server initiates page_exec on its own in
+// the middle of a turn.
 function listen() {
   const es = new EventSource('api/events');
   es.addEventListener('page_exec', async e => {
@@ -88,19 +90,19 @@ function listen() {
   es.onerror = () => setState('error');
 }
 
-// Кадры SSE разбираются вручную (EventSource не умеет POST). Три места,
-// которые здесь не дозволено спускать молча:
-//  - кадр может прийти разорванным между двумя чтениями сокета — buf
-//    копится между итерациями и режется только по найденному "\n\n",
-//    так что недочитанный хвост просто ждёт следующего чтения;
-//  - "data:" в кадре может отсутствовать или быть кривым (обрыв
-//    соединения на середине кадра, посторонний байт-мусор) — тогда
-//    JSON.parse(undefined) уронит весь ход; кадр без данных пропускаем,
-//    а не парсим наугад;
-//  - поток может оборваться, не прислав ни "done", ни "error" (обрыв
-//    сети, TCP reset). Если тихо считать это пустым ответом, ход будет
-//    засчитан как легальный "пустой ответ", хотя код модели мог быть
-//    потерян на середине передачи. Поэтому finished — обязателен.
+// SSE frames are parsed by hand (EventSource cannot POST). Three things that
+// must not be swallowed silently here:
+//  - a frame may arrive split across two socket reads — buf accumulates
+//    between iterations and is only cut at a "\n\n" that was actually found,
+//    so an incomplete tail simply waits for the next read;
+//  - "data:" may be missing or malformed in a frame (a connection dropped
+//    mid-frame, stray byte garbage) — then JSON.parse(undefined) would kill
+//    the whole turn; a frame without data is skipped rather than parsed
+//    blindly;
+//  - the stream may end without ever sending "done" or "error" (a network
+//    drop, a TCP reset). Quietly treating that as an empty answer would count
+//    the turn as a legitimate "empty response", even though the model's code
+//    could have been lost mid-transfer. Hence `finished` is mandatory.
 async function readStream(res, onDelta) {
   const reader = res.body.getReader();
   const dec = new TextDecoder();
@@ -128,15 +130,15 @@ async function readStream(res, onDelta) {
       else if (ev.event === 'error') { error = data.message; finished = true; }
     }
   }
-  if (!finished) throw new Error('поток оборвался, не дождавшись ответа модели');
+  if (!finished) throw new Error('the stream ended before the model answered');
   if (error) throw new Error(error);
   return code;
 }
 
 async function commit() {
-  // Горячая клавиша не знает про disabled кнопки — без этой проверки
-  // Cmd/Ctrl+Enter во время уже идущего хода запускает второй commit()
-  // поверх первого хода.
+  // The hotkey knows nothing about the button being disabled — without this
+  // check, Cmd/Ctrl+Enter during a turn already in flight would start a second
+  // commit() on top of the first one.
   if (sendBtn.disabled) return;
   sendBtn.disabled = true;
   try {
@@ -147,9 +149,9 @@ async function commit() {
       headers: { 'content-type': 'application/json' },
       body: JSON.stringify({ diff }),
     });
-    // Модель больше не возвращает код в ответе на commit — она сама зовёт
-    // page_exec посреди хода через постоянный канал listen(). Здесь просто
-    // дожидаемся конца потока (done/error).
+    // The model no longer returns code in the reply to commit — it calls
+    // page_exec itself mid-turn over the persistent channel from listen().
+    // Here we just wait for the stream to end (done/error).
     await readStream(res, () => {});
     setState('idle');
   } catch (e) {

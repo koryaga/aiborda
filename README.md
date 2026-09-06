@@ -1,35 +1,35 @@
 # aiborda
 
-Динамическая HTML-страница, которая служит интерфейсом к
-[pi](https://github.com/earendil-works/pi): вы пишете, что нужно, а pi в
-реальном времени перестраивает саму страницу — пишет текст, рисует список,
-строит таблицу — вместо того чтобы отвечать в отдельном чате. При этом pi
-может править файлы на компьютере или сходить в интернет, если это нужно
-для ответа.
+A live HTML page that acts as an interface to
+[pi](https://github.com/earendil-works/pi): you write what you need, and pi
+rebuilds the page itself in real time — writing text, drawing a list, building
+a table — instead of answering in a separate chat. Along the way pi can edit
+files on your computer or go out to the internet, if that is what the answer
+takes.
 
-## Что нужно для запуска
+## What you need to run it
 
-`aiborda` — это только страница и мост к pi: весь ИИ, модель, ключи и
-инструменты здесь от pi, своих у aiborda нет.
+`aiborda` is only the page and the bridge to pi: all the AI, the model, the
+keys and the tools come from pi — aiborda has none of its own.
 
-- **Node.js 20 или новее** — сама программа на нём написана.
-- **[pi](https://github.com/earendil-works/pi)** — модель, ключи API и
-  доступ к интернету предоставляет он.
+- **Node.js 20 or newer** — the program itself is written on it.
+- **[pi](https://github.com/earendil-works/pi)** — it provides the model, the
+  API keys and the internet access.
 
-Поставить pi и подключить к нему модель (пример для DeepSeek — подойдёт
-любой провайдер, поддерживаемый pi):
+Install pi and connect a model to it (the example uses DeepSeek — any provider
+pi supports will do):
 
 ```bash
 npm install -g @earendil-works/pi-coding-agent
-export DEEPSEEK_API_KEY=ваш-ключ
+export DEEPSEEK_API_KEY=your-key
 pi auth check --provider deepseek
 ```
 
-`pi auth check` подтвердит, что ключ найден и провайдер готов к работе.
-Список переменных для других провайдеров и подробности — в
-[документации pi](https://github.com/earendil-works/pi).
+`pi auth check` confirms that the key was found and the provider is ready. The
+variables for other providers and the details are in the
+[pi documentation](https://github.com/earendil-works/pi).
 
-## Запуск
+## Running it
 
 ```bash
 git clone https://github.com/koryaga/aiborda.git
@@ -38,38 +38,39 @@ npm install
 npm start
 ```
 
-Откройте в браузере `http://127.0.0.1:8730`.
+Open `http://127.0.0.1:8730` in a browser.
 
-## Как пользоваться
+## How to use it
 
-Внизу страницы — поле ввода. Напишите, что нужно, и нажмите **Ctrl+Enter**
-(или **Cmd+Enter** на Mac) либо кнопку «отправить». Ответ — не новое
-сообщение в ленте, а изменение той же страницы: pi правит DOM напрямую.
+The input field is at the bottom of the page. Write what you need and press
+**Ctrl+Enter** (or **Cmd+Enter** on a Mac), or the **send** button. The answer
+is not a new message in a feed but a change to the same page: pi edits the DOM
+directly.
 
-Примеры того, что можно попросить:
+Examples of what you can ask for:
 
-- «сделай список покупок из трёх пунктов»
-- «нарисуй таблицу 3×4»
-- «узнай, сколько файлов в текущей папке» — ИИ выполнит команду в терминале
-- «запомни, что меня зовут Сергей» — сохранится и переживёт перезагрузку
-  страницы
-- «сходи на сайт X и покажи главные новости»
+- "make a shopping list with three items"
+- "draw a 3×4 table"
+- "find out how many files are in the current folder" — the AI will run a
+  command in the terminal
+- "remember that my name is Sergey" — this is saved and survives a page reload
+- "go to site X and show me the top news"
 
-Весь текст, который появляется на странице, обычно можно редактировать
-прямо в браузере — кликните и печатайте. Это ещё один способ ответить ИИ,
-не набирая ничего в поле внизу.
+Any text that appears on the page can usually be edited right in the browser —
+click and type. That is another way to answer the AI without typing anything
+into the field at the bottom.
 
-Пока идёт ответ, кружок рядом с кнопкой крутится. Полный текст рассуждений
-ИИ виден в терминале, где запущен `npm start`.
+While an answer is in progress, the dot next to the button spins. The full text
+of the AI's reasoning is visible in the terminal where `npm start` is running.
 
-## Важно знать
+## Worth knowing
 
-У ИИ есть доступ к терминалу и файлам на этом компьютере, и он получает его
-сразу, без подтверждения каждого действия. Не открывайте с его помощью
-страницы, которым не доверяете, — их содержимое может попытаться дать ИИ
-собственные, вредоносные инструкции.
+The AI has access to the terminal and the files on this computer, and it gets
+that access immediately, without confirming each action. Do not use it to open
+pages you do not trust — their contents may try to give the AI instructions of
+their own, malicious ones.
 
-## Разработчикам
+## For developers
 
-Архитектура, протокол и известные ограничения — в
+The architecture, the protocol and the known limitations are in
 [docs/DEVELOPMENT.md](docs/DEVELOPMENT.md).

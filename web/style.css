@@ -12,7 +12,7 @@ main { display: flex; flex-direction: column; height: 100vh; }
 
 #model { margin-left: auto; opacity: .6; font-size: 12px; }
 
-/* Индикатор хода: кружок вместо текста. Три состояния — свободна, идёт, ошибка. */
+/* Turn indicator: a dot instead of text. Three states — idle, busy, error. */
 #dot {
   width: 12px; height: 12px; border-radius: 50%;
   display: inline-block; flex: none; box-sizing: border-box;
@@ -27,8 +27,8 @@ main { display: flex; flex-direction: column; height: 100vh; }
 }
 @keyframes dot-spin { to { transform: rotate(360deg); } }
 
-/* Общее правило про reduced-motion гасит только transition, анимации — нет,
-   поэтому вращение выключаем отдельно и заменяем статичной заливкой. */
+/* The general reduced-motion rule only kills transitions, not animations, so
+   the spin is disabled separately and replaced with a solid fill. */
 @media (prefers-reduced-motion: reduce) {
   #dot[data-state="busy"] { animation: none; border: 0; background: Highlight; }
 }

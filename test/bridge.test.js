@@ -2,7 +2,7 @@ import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { createBridge } from '../server/bridge.js';
 
-test('call отправляет запрос и разрешается ответом с тем же id', async () => {
+test('call sends a request and resolves with the reply carrying the same id', async () => {
   const sent = [];
   const b = createBridge({ send: m => sent.push(m), timeoutMs: 1000 });
   const p = b.call('return 1 + 1');
@@ -13,66 +13,67 @@ test('call отправляет запрос и разрешается отве�
   assert.deepEqual(await p, { ok: true, value: '2' });
 });
 
-test('ответ с чужим id игнорируется, свой всё ещё ждёт', async () => {
+test("a reply with someone else's id is ignored, our own is still awaited", async () => {
   const sent = [];
   const b = createBridge({ send: m => sent.push(m), timeoutMs: 1000 });
   const p = b.call('x');
-  b.deliver({ id: 'чужой', ok: true, value: 'подделка' });
-  b.deliver({ id: sent[0].id, ok: true, value: 'настоящий' });
-  assert.deepEqual(await p, { ok: true, value: 'настоящий' });
+  b.deliver({ id: 'foreign', ok: true, value: 'forged' });
+  b.deliver({ id: sent[0].id, ok: true, value: 'genuine' });
+  assert.deepEqual(await p, { ok: true, value: 'genuine' });
 });
 
-test('повторный ответ на тот же id не ломает мост', async () => {
+test('a duplicate reply for the same id does not break the bridge', async () => {
   const sent = [];
   const b = createBridge({ send: m => sent.push(m), timeoutMs: 1000 });
   const p = b.call('x');
-  b.deliver({ id: sent[0].id, ok: true, value: 'первый' });
-  b.deliver({ id: sent[0].id, ok: true, value: 'второй' });
-  assert.deepEqual(await p, { ok: true, value: 'первый' });
+  b.deliver({ id: sent[0].id, ok: true, value: 'first' });
+  b.deliver({ id: sent[0].id, ok: true, value: 'second' });
+  assert.deepEqual(await p, { ok: true, value: 'first' });
 });
 
-test('без ответа вызов отклоняется по таймауту', async () => {
+test('with no reply the call is rejected on timeout', async () => {
   const b = createBridge({ send: () => {}, timeoutMs: 20 });
-  await assert.rejects(b.call('x'), /не ответил/);
+  await assert.rejects(b.call('x'), /did not answer/);
 });
 
-test('идентификаторы не повторяются', () => {
+test('identifiers do not repeat', () => {
   const sent = [];
   const b = createBridge({ send: m => sent.push(m), timeoutMs: 1000 });
-  // Вызовы намеренно не разрешаются: интересуют только id в sent. Ловим
-  // отказ по таймауту, чтобы он не всплыл unhandledRejection после теста.
+  // The calls are deliberately never resolved: only the ids in `sent` matter.
+  // The timeout rejection is caught so it does not surface as an
+  // unhandledRejection after the test.
   b.call('a').catch(() => {});
   b.call('b').catch(() => {});
   b.call('c').catch(() => {});
   assert.equal(new Set(sent.map(m => m.id)).size, 3);
 });
 
-test('ошибка исполнения доходит как есть', async () => {
+test('an execution error comes through as is', async () => {
   const sent = [];
   const b = createBridge({ send: m => sent.push(m), timeoutMs: 1000 });
-  const p = b.call('плохой код');
-  b.deliver({ id: sent[0].id, ok: false, error: 'ReferenceError: плохой' });
-  assert.deepEqual(await p, { ok: false, error: 'ReferenceError: плохой' });
+  const p = b.call('bad code');
+  b.deliver({ id: sent[0].id, ok: false, error: 'ReferenceError: bad' });
+  assert.deepEqual(await p, { ok: false, error: 'ReferenceError: bad' });
 });
 
-test('reset отклоняет все ожидающие вызовы', async () => {
+test('reset rejects every pending call', async () => {
   const sent = [];
   const b = createBridge({ send: m => sent.push(m), timeoutMs: 5000 });
   const p1 = b.call('a'), p2 = b.call('b');
-  b.reset('страница перезагружена');
-  await assert.rejects(p1, /перезагружена/);
-  await assert.rejects(p2, /перезагружена/);
+  b.reset('the page was reloaded');
+  await assert.rejects(p1, /reloaded/);
+  await assert.rejects(p2, /reloaded/);
   assert.equal(b.pendingCount(), 0);
 });
 
-test('вызов без подключённой оболочки отклоняется сразу', async () => {
+test('a call with no shell connected is rejected immediately', async () => {
   const b = createBridge({ send: null, timeoutMs: 1000 });
-  await assert.rejects(b.call('x'), /оболочка не подключена/);
+  await assert.rejects(b.call('x'), /the shell is not connected/);
 });
 
-// --- Дополнительные тесты (самопроверка) ---
+// --- Extra tests (self-check) ---
 
-test('таймер снимается при ответе: pendingCount падает в ноль, повторный deliver не срабатывает', async () => {
+test('the timer is cleared on reply: pendingCount drops to zero, a repeat deliver is a no-op', async () => {
   const sent = [];
   const b = createBridge({ send: m => sent.push(m), timeoutMs: 5000 });
   const p = b.call('x');
@@ -85,26 +86,26 @@ test('таймер снимается при ответе: pendingCount пада
   assert.equal(second, false);
 });
 
-test('setSender(null) посреди жизни: ожидающие вызовы не ломаются, новые отклоняются сразу', async () => {
+test('setSender(null) mid-life: pending calls survive, new ones are rejected immediately', async () => {
   const sent = [];
   const b = createBridge({ send: m => sent.push(m), timeoutMs: 5000 });
   const p = b.call('a');
   b.setSender(null);
   b.deliver({ id: sent[0].id, ok: true, value: 'ok' });
   assert.deepEqual(await p, { ok: true, value: 'ok' });
-  await assert.rejects(b.call('b'), /оболочка не подключена/);
+  await assert.rejects(b.call('b'), /the shell is not connected/);
 });
 
-test('deliver с мусором возвращает false и не бросает', () => {
+test('deliver with garbage returns false and does not throw', () => {
   const b = createBridge({ send: () => {}, timeoutMs: 1000 });
   assert.equal(b.deliver(null), false);
   assert.equal(b.deliver(undefined), false);
   assert.equal(b.deliver({}), false);
-  assert.equal(b.deliver('строка'), false);
+  assert.equal(b.deliver('a string'), false);
 });
 
-test('reset на пустом мосте не бросает', () => {
+test('reset on an empty bridge does not throw', () => {
   const b = createBridge({ send: () => {}, timeoutMs: 1000 });
-  assert.doesNotThrow(() => b.reset('причина'));
+  assert.doesNotThrow(() => b.reset('a reason'));
   assert.equal(b.pendingCount(), 0);
 });

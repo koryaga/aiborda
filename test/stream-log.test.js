@@ -4,110 +4,110 @@ import { formatEvent, createPrinter, streamKind } from '../server/stream-log.js'
 
 const plain = ev => formatEvent(ev, { color: false });
 
-test('текст модели идёт как есть, без обрамления', () => {
-  const s = plain({ type: 'message_update', assistantMessageEvent: { type: 'text_delta', delta: 'при' } });
-  assert.equal(s, 'при');
+test("the model's text goes through as is, with no framing", () => {
+  const s = plain({ type: 'message_update', assistantMessageEvent: { type: 'text_delta', delta: 'hel' } });
+  assert.equal(s, 'hel');
 });
 
-test('рассуждения приглушаются цветом, а не прячутся', () => {
+test('reasoning is dimmed with color, not hidden', () => {
   const withColor = formatEvent(
-    { type: 'message_update', assistantMessageEvent: { type: 'thinking_delta', delta: 'думаю' } },
+    { type: 'message_update', assistantMessageEvent: { type: 'thinking_delta', delta: 'thinking' } },
     { color: true });
-  assert.ok(withColor.includes('думаю'));
-  assert.ok(withColor.startsWith('\x1b[2m'), 'должен быть приглушённый цвет');
-  assert.equal(plain({ type: 'message_update', assistantMessageEvent: { type: 'thinking_delta', delta: 'думаю' } }), 'думаю');
+  assert.ok(withColor.includes('thinking'));
+  assert.ok(withColor.startsWith('\x1b[2m'), 'the dim color must be there');
+  assert.equal(plain({ type: 'message_update', assistantMessageEvent: { type: 'thinking_delta', delta: 'thinking' } }), 'thinking');
 });
 
-test('поток без дельты ничего не печатает', () => {
+test('a stream event with no delta prints nothing', () => {
   assert.equal(plain({ type: 'message_update', assistantMessageEvent: { type: 'text_start' } }), null);
   assert.equal(plain({ type: 'message_update' }), null);
 });
 
-test('вызов инструмента показывает имя и аргументы', () => {
+test('a tool call shows the name and the arguments', () => {
   const s = plain({ type: 'tool_execution_start', toolName: 'page_exec', args: { code: 'return 1' } });
   assert.ok(s.includes('page_exec'));
   assert.ok(s.includes('return 1'));
-  assert.ok(s.startsWith('\n'), 'вызов начинается с новой строки, чтобы не слипнуться с текстом');
+  assert.ok(s.startsWith('\n'), 'a call starts on a new line so it does not run into the text');
 });
 
-test('результат инструмента разворачивается из content', () => {
+test('a tool result is unwrapped from content', () => {
   const s = plain({ type: 'tool_execution_end', toolName: 'page_exec',
-    result: { content: [{ type: 'text', text: 'выполнено' }] }, isError: false });
+    result: { content: [{ type: 'text', text: 'done' }] }, isError: false });
   assert.ok(s.includes('page_exec'));
-  assert.ok(s.includes('выполнено'));
+  assert.ok(s.includes('done'));
 });
 
-test('ошибка инструмента помечается', () => {
+test('a tool error is marked', () => {
   const s = plain({ type: 'tool_execution_end', toolName: 'bash',
-    result: { content: [{ type: 'text', text: 'не найдено' }] }, isError: true });
+    result: { content: [{ type: 'text', text: 'not found' }] }, isError: true });
   assert.ok(s.includes('✗'));
 });
 
-test('длинные аргументы и результаты усекаются в одну строку', () => {
+test('long arguments and results are truncated onto a single line', () => {
   const s = plain({ type: 'tool_execution_start', toolName: 'page_exec',
     args: { code: 'x'.repeat(1000) + '\ny' } });
-  assert.equal(s.split('\n').filter(Boolean).length, 1, 'должна остаться одна строка');
+  assert.equal(s.split('\n').filter(Boolean).length, 1, 'one line must remain');
   assert.ok(s.includes('…'));
 });
 
-test('перевод строки внутри результата не ломает одну строку', () => {
+test('a newline inside a result does not break the single line', () => {
   const s = plain({ type: 'tool_execution_end', toolName: 'bash',
-    result: { content: [{ type: 'text', text: 'первая\nвторая' }] }, isError: false });
+    result: { content: [{ type: 'text', text: 'first\nsecond' }] }, isError: false });
   assert.equal(s.trim().split('\n').length, 1);
 });
 
-test('результат строкой тоже понимается', () => {
-  const s = plain({ type: 'tool_execution_end', toolName: 'x', result: 'готово', isError: false });
-  assert.ok(s.includes('готово'));
+test('a result given as a plain string is understood too', () => {
+  const s = plain({ type: 'tool_execution_end', toolName: 'x', result: 'done', isError: false });
+  assert.ok(s.includes('done'));
 });
 
-test('прочие события молчат, мусор не роняет', () => {
+test('other events stay silent, garbage does not crash it', () => {
   for (const ev of [null, undefined, {}, { type: 42 }, { type: 'message_start' }, { type: 'agent_start' }]) {
-    assert.equal(plain(ev), null, 'должно быть null для ' + JSON.stringify(ev));
+    assert.equal(plain(ev), null, 'must be null for ' + JSON.stringify(ev));
   }
 });
 
-test('turn_start и agent_settled разделяют ходы пустой строкой', () => {
+test('turn_start and agent_settled separate turns with a blank line', () => {
   assert.equal(plain({ type: 'turn_start' }), '\n');
   assert.equal(plain({ type: 'agent_settled' }), '\n');
 });
 
-test('createPrinter пишет только то, что форматируется', () => {
+test('createPrinter writes only what actually formats', () => {
   const out = [];
   const print = createPrinter(s => out.push(s), { color: false });
-  print({ type: 'message_update', assistantMessageEvent: { type: 'text_delta', delta: 'а' } });
+  print({ type: 'message_update', assistantMessageEvent: { type: 'text_delta', delta: 'a' } });
   print({ type: 'message_start' });
-  print({ type: 'message_update', assistantMessageEvent: { type: 'text_delta', delta: 'б' } });
-  assert.deepEqual(out, ['а', 'б']);
+  print({ type: 'message_update', assistantMessageEvent: { type: 'text_delta', delta: 'b' } });
+  assert.deepEqual(out, ['a', 'b']);
 });
 
-test('streamKind различает мысли и ответ', () => {
+test('streamKind tells thinking from answer', () => {
   assert.equal(streamKind({ type: 'message_update', assistantMessageEvent: { type: 'thinking_delta' } }), 'thinking');
   assert.equal(streamKind({ type: 'message_update', assistantMessageEvent: { type: 'text_delta' } }), 'text');
   assert.equal(streamKind({ type: 'tool_execution_start' }), null);
 });
 
-test('переход от мыслей к ответу разделяется переводом строки', () => {
+test('the switch from thinking to answer is separated by a newline', () => {
   const out = [];
   const print = createPrinter(s => out.push(s), { color: false });
-  print({ type: 'message_update', assistantMessageEvent: { type: 'thinking_delta', delta: 'думаю' } });
-  print({ type: 'message_update', assistantMessageEvent: { type: 'text_delta', delta: 'отвечаю' } });
-  assert.deepEqual(out, ['думаю', '\n', 'отвечаю']);
+  print({ type: 'message_update', assistantMessageEvent: { type: 'thinking_delta', delta: 'thinking' } });
+  print({ type: 'message_update', assistantMessageEvent: { type: 'text_delta', delta: 'answering' } });
+  assert.deepEqual(out, ['thinking', '\n', 'answering']);
 });
 
-test('внутри одного потока лишних переводов строки нет', () => {
+test('within a single stream there are no extra newlines', () => {
   const out = [];
   const print = createPrinter(s => out.push(s), { color: false });
-  print({ type: 'message_update', assistantMessageEvent: { type: 'text_delta', delta: 'а' } });
-  print({ type: 'message_update', assistantMessageEvent: { type: 'text_delta', delta: 'б' } });
-  assert.deepEqual(out, ['а', 'б']);
+  print({ type: 'message_update', assistantMessageEvent: { type: 'text_delta', delta: 'a' } });
+  print({ type: 'message_update', assistantMessageEvent: { type: 'text_delta', delta: 'b' } });
+  assert.deepEqual(out, ['a', 'b']);
 });
 
-test('после вызова инструмента лишний перевод не вставляется', () => {
+test('no extra newline is inserted after a tool call', () => {
   const out = [];
   const print = createPrinter(s => out.push(s), { color: false });
-  print({ type: 'message_update', assistantMessageEvent: { type: 'thinking_delta', delta: 'думаю' } });
+  print({ type: 'message_update', assistantMessageEvent: { type: 'thinking_delta', delta: 'thinking' } });
   print({ type: 'tool_execution_start', toolName: 't', args: {} });
-  print({ type: 'message_update', assistantMessageEvent: { type: 'text_delta', delta: 'ответ' } });
-  assert.equal(out.filter(x => x === '\n').length, 0, 'вызов инструмента уже несёт свои переводы строк');
+  print({ type: 'message_update', assistantMessageEvent: { type: 'text_delta', delta: 'answer' } });
+  assert.equal(out.filter(x => x === '\n').length, 0, 'a tool call already carries its own newlines');
 });

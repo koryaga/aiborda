@@ -1,7 +1,7 @@
-// Мост от сервера к образу. Сервер не достаёт до образа напрямую: запрос
-// уходит в оболочку по SSE, оболочка передаёт его образу через postMessage,
-// и результат возвращается обратно POST-ом. Здесь живёт только сопоставление
-// запросов с ответами.
+// The bridge from the server to the image. The server cannot reach the image
+// directly: a request goes to the shell over SSE, the shell hands it to the
+// image via postMessage, and the result comes back as a POST. Only the matching
+// of requests to responses lives here.
 
 export function createBridge({ send, timeoutMs = 15000 } = {}) {
   const pending = new Map();
@@ -9,12 +9,12 @@ export function createBridge({ send, timeoutMs = 15000 } = {}) {
   let sender = send;
 
   function call(code) {
-    if (!sender) return Promise.reject(new Error('оболочка не подключена'));
+    if (!sender) return Promise.reject(new Error('the shell is not connected'));
     const id = 'p' + (++seq);
     return new Promise((resolve, reject) => {
       const timer = setTimeout(() => {
         pending.delete(id);
-        reject(new Error(`образ не ответил за ${timeoutMs} мс`));
+        reject(new Error(`the image did not answer within ${timeoutMs} ms`));
       }, timeoutMs);
       pending.set(id, { resolve, reject, timer });
       sender({ type: 'page_exec', id, code });
@@ -23,7 +23,7 @@ export function createBridge({ send, timeoutMs = 15000 } = {}) {
 
   function deliver(msg) {
     const entry = pending.get(msg?.id);
-    if (!entry) return false;          // чужой или повторный ответ
+    if (!entry) return false;          // someone else's answer, or a duplicate
     pending.delete(msg.id);
     clearTimeout(entry.timer);
     entry.resolve(msg.ok

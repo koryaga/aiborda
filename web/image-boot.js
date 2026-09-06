@@ -1,5 +1,5 @@
-// Исполняется внутри образа и в тестах. Импортов нет: текст этого файла
-// инлайнится в srcdoc обычным script-тегом, поэтому здесь только объявления.
+// Runs inside the image and in tests. No imports: the text of this file is
+// inlined into srcdoc as a plain script tag, so only declarations here.
 
 function createImage(doc, send, opts) {
   const win = doc.defaultView;
@@ -9,14 +9,14 @@ function createImage(doc, send, opts) {
   const LIMIT = 10000;
 
   let execDepth = 0;
-  // trustSync: true только в синхронном+микротасковом хвосте прямо после
-  // запуска кода модели (до первого реального прохода через макротаск).
-  // Пока это так, ни один человек не может вклиниться — вкладка занята
-  // синхронным JS. Мутации, увиденные в этом окне, — точно от модели,
-  // и их узлы уходят в modelTouched. После первого макротаска (await
-  // внутри кода модели, либо весь grace-хвост) доверять execDepth>0
-  // самому по себе нельзя: человек мог вклиниться. Поэтому дальше
-  // модельными считаются только записи по уже известным узлам.
+  // trustSync: true only in the synchronous + microtask tail right after the
+  // model's code starts (before the first real macrotask boundary). While that
+  // holds, no human can slip in — the tab is busy running synchronous JS.
+  // Mutations seen in that window are certainly the model's, and their nodes go
+  // into modelTouched. After the first macrotask (an await inside the model's
+  // code, or the whole grace tail) execDepth > 0 alone is no longer
+  // trustworthy: a human could have slipped in. From then on only writes to
+  // already-known nodes count as the model's.
   let trustSync = false;
   const modelTouched = new Set();
   const recs = [];
@@ -52,15 +52,15 @@ function createImage(doc, send, opts) {
     }
   });
 
-  // M9: путь от id доверяем, только если он однозначно ведёт назад к тому
-  // же узлу — иначе дублирующийся или синтаксически кривой id (пробел,
-  // ведущая цифра) даст неверный или нерабочий селектор.
+  // M9: an id-based path is trusted only if it unambiguously leads back to the
+  // same node — otherwise a duplicated or syntactically broken id (a space, a
+  // leading digit) would yield a wrong or unusable selector.
   function path(n) {
     if (n.nodeType === 3) n = n.parentNode;
     if (!n || n === doc.documentElement) return 'html';
-    // M8: у отсоединённого узла нет надёжного пути — врать про адрес
-    // (bare tag может указывать на другой живой узел) хуже, чем пометить.
-    if (!n.isConnected) return n.nodeName.toLowerCase() + ' (удалён)';
+    // M8: a detached node has no reliable path — lying about its address (a
+    // bare tag may point at a different live node) is worse than flagging it.
+    if (!n.isConnected) return n.nodeName.toLowerCase() + ' (detached)';
     if (n.id) {
       let unique = false;
       try { unique = doc.querySelector('#' + n.id) === n; } catch (e) { unique = false; }
@@ -72,24 +72,24 @@ function createImage(doc, send, opts) {
     return path(p) + ' > ' + n.tagName.toLowerCase() + ':nth-child(' + i + ')';
   }
 
-  // Текстовый узел из одних пробелов — это форматирование разметки, а не
-  // намерение человека. На реальных дифах такие строки составляли 22%:
-  // «добавлен в html > body:nth-child(2): "\n\n"» приходило в каждом первом
-  // ходе сессии. Сигнал от этого только тонет.
+  // A text node made of nothing but whitespace is markup formatting, not human
+  // intent. On real diffs such lines were 22% of the output: "added to
+  // html > body:nth-child(2): \"\\n\\n\"" showed up in every other turn of a
+  // session. All it does is drown the signal.
   function isBlankText(n) {
     return n && n.nodeType === 3 && !String(n.data ?? '').trim();
   }
 
   function serialize(n) {
     if (n.nodeType === 3) return JSON.stringify(n.data);
-    // I7: строка дифа — одна строка. Схлопываем только переносы (и пробелы
-    // вокруг них), внутристрочные отступы не трогаем.
+    // I7: a diff line is a single line. Collapse newlines only (and the spaces
+    // around them); leave intra-line indentation alone.
     return n.outerHTML.replace(/\s*\n\s*/g, ' ');
   }
 
-  // C3: одно понятие «состояние поля» и для baseline (focusin), и для
-  // сравнения в дифе. undefined — значит поле не отслеживаем (I6:
-  // contenteditable и подобное без .value).
+  // C3: one notion of "field state", used both for the baseline (focusin) and
+  // for the comparison in the diff. undefined means the field is not tracked
+  // (I6: contenteditable and the like, which have no .value).
   function fieldState(el) {
     if (!el) return undefined;
     const type = (el.type || '').toLowerCase();
@@ -101,12 +101,12 @@ function createImage(doc, send, opts) {
     return undefined;
   }
 
-  // Очистка поля ввода после отправки. Живёт здесь, а не в оболочке, чтобы быть
-  // атомарной со сборкой дифа: будь это отдельным сообщением, человек успел бы
-  // набрать в промежутке, и мы стёрли бы набранное.
-  // baseline пересевается пустым значением — иначе следующий диф сказал бы
-  // «было <только что отправленное>», хотя поле уже пустое: focusin повторно
-  // не придёт, фокус же из поля не уходил.
+  // Clearing the input after a commit. It lives here, not in the shell, so that
+  // it is atomic with building the diff: were it a separate message, the human
+  // could type in the gap and we would wipe what they typed.
+  // The baseline is re-seeded with the empty value — otherwise the next diff
+  // would say "was <what was just sent>" even though the field is already
+  // empty: focusin will not fire again, since focus never left the field.
   function clearInput() {
     const el = doc.getElementById('q');
     if (!el || !('value' in el)) return;
@@ -123,8 +123,8 @@ function createImage(doc, send, opts) {
     modelTouched.clear();
   }
 
-  // Синхронизация делается на клоне: живой DOM — это память агента,
-  // и мутировать его ради сериализации нельзя.
+  // Syncing is done on a clone: the live DOM is the agent's memory, and must
+  // not be mutated just to serialize it.
   function snapshot() {
     const clone = doc.body.cloneNode(true);
     const src = doc.body.querySelectorAll('input,textarea,select,option');
@@ -164,13 +164,13 @@ function createImage(doc, send, opts) {
     }
   }
 
-  // Запись атрибута/текста копится по ключу (узел [+ атрибут]):
-  // - old — oldValue самой первой ЧЕЛОВЕЧЕСКОЙ записи по ключу;
-  // - override — если после человеческой записи есть более поздняя
-  //   МОДЕЛЬНАЯ запись, override — её oldValue: именно это оставил
-  //   человек до того, как модель переписала значение (C2). Новая
-  //   человеческая запись сбрасывает override заново.
-  // - hasHuman — был ли вообще человек; без этого строка не пишется.
+  // Attribute/text writes accumulate per key (node [+ attribute]):
+  // - old — the oldValue of the very first HUMAN write for that key;
+  // - override — if a later MODEL write follows a human one, override is its
+  //   oldValue: exactly what the human left behind before the model rewrote the
+  //   value (C2). A new human write resets override again.
+  // - hasHuman — whether a human touched it at all; without that, no line is
+  //   emitted.
   function applyRecord(entry, r) {
     if (!r.byModel) {
       if (!entry.hasHuman) entry.old = r.oldValue;
@@ -181,10 +181,10 @@ function createImage(doc, send, opts) {
     }
   }
 
-  // Коалесцирование обязательно: getAttribute в момент доставки записи
-  // возвращает текущее значение, а не значение на момент мутации.
-  // Старое берётся из самой ранней человеческой записи, новое — из
-  // живого DOM, если модель не переписала значение позже (см. applyRecord).
+  // Coalescing is mandatory: getAttribute at the moment a record is delivered
+  // returns the current value, not the value at the time of the mutation.
+  // The old value comes from the earliest human write; the new one from the
+  // live DOM, unless the model rewrote it later (see applyRecord).
   function buildDiff() {
     const attrs = new Map();
     const texts = new Map();
@@ -205,16 +205,16 @@ function createImage(doc, send, opts) {
       } else {
         if (r.byModel) continue;
         for (const n of r.removed) removed.push({ node: n, parent: r.target });
-        // I5: перестановка узла туда-обратно даёт две записи childList на
-        // один и тот же узел — оставляем только последнюю (Map, не массив).
+        // I5: moving a node there and back yields two childList records for the
+        // same node — keep only the last one (a Map, not an array).
         for (const n of r.added) added.set(n, r.target);
       }
     }
 
-    // M10: узел, добавленный в этом же окне, описывается один раз через
-    // serialize() в строке "добавлен" — отдельных строк про его атрибуты
-    // и текст (в том числе вложенные добавления, например текстовый узел
-    // от .textContent =) быть не должно.
+    // M10: a node added within this same window is described once, via
+    // serialize() on the "added" line — there must be no separate lines about
+    // its attributes and text (including nested additions, such as the text
+    // node produced by .textContent =).
     for (const node of Array.from(added.keys())) {
       for (const other of added.keys()) {
         if (other !== node && other.contains(node)) { added.delete(node); break; }
@@ -228,9 +228,10 @@ function createImage(doc, send, opts) {
 
     const lines = [];
 
-    // C4: baseline не стирается целиком после сборки — он пересевается
-    // текущим состоянием каждого тронутого поля. Иначе следующий ход без
-    // повторного фокуса (фокус же не уходил) сравнивает не с чем.
+    // C4: the baseline is not wiped wholesale after a build — it is re-seeded
+    // with the current state of every touched field. Otherwise the next turn,
+    // with no repeat focus (focus never left), would have nothing to compare
+    // against.
     for (const el of dirty) {
       const state = fieldState(el);
       if (state === undefined) { baseline.delete(el); continue; } // I6
@@ -253,19 +254,19 @@ function createImage(doc, send, opts) {
       if (!node.isConnected || insideAdded(node) || !entry.hasHuman) continue;
       const now = entry.override !== undefined ? entry.override : node.data;
       if (entry.old === now) continue;
-      // Только если пробелы с обеих сторон: "\n " -> "привет" — настоящая правка.
+      // Skip only if both sides are whitespace: "\n " -> "hello" is a real edit.
       if (!String(entry.old ?? '').trim() && !String(now ?? '').trim()) continue;
-      lines.push(path(node) + '  текст: ' + JSON.stringify(entry.old) + ' -> ' + JSON.stringify(now));
+      lines.push(path(node) + '  text: ' + JSON.stringify(entry.old) + ' -> ' + JSON.stringify(now));
     }
     for (const item of removed) {
       if (item.node.isConnected || addedNodes.has(item.node)) continue;
       if (isBlankText(item.node)) continue;
-      lines.push('удалён из ' + path(item.parent) + ': ' + serialize(item.node));
+      lines.push('removed from ' + path(item.parent) + ': ' + serialize(item.node));
     }
     for (const [node, parent] of added) {
       if (!node.isConnected) continue;
       if (isBlankText(node)) continue;
-      lines.push('добавлен в ' + path(parent) + ': ' + serialize(node));
+      lines.push('added to ' + path(parent) + ': ' + serialize(node));
     }
 
     recs.length = 0;
@@ -302,10 +303,11 @@ function createImage(doc, send, opts) {
     for (const t of ['input', 'change']) {
       doc.addEventListener(t, e => { if (trusted(e)) dirty.add(e.target); }, true);
     }
-    // Ctrl/Cmd+Enter. Событие клавиатуры из образа в оболочку не всплывает —
-    // это разные origin, — поэтому о нажатии сообщает сам образ.
-    // trusted() отсекает синтетические события: иначе код модели мог бы
-    // запустить ход за человека, просто разослав keydown.
+    // Ctrl/Cmd+Enter. A keyboard event does not bubble from the image up into
+    // the shell — they are different origins — so the image reports the
+    // keypress itself. trusted() filters out synthetic events: otherwise the
+    // model's code could commit a turn on the human's behalf just by
+    // dispatching a keydown.
     doc.addEventListener('keydown', e => {
       if (!trusted(e)) return;
       if (e.key !== 'Enter' || !(e.ctrlKey || e.metaKey)) return;

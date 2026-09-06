@@ -13,91 +13,91 @@ function makeImage(html = '<textarea id="q"></textarea><div id="out"></div>') {
   return { dom, doc: dom.window.document, img, sent };
 }
 
-test('exec возвращает значение', async () => {
+test('exec returns a value', async () => {
   const { img } = makeImage();
   const r = await img.exec('return 1 + 1');
   assert.equal(r.ok, true);
   assert.equal(r.value, '2');
 });
 
-test('exec меняет DOM', async () => {
+test('exec changes the DOM', async () => {
   const { img, doc } = makeImage();
-  await img.exec('document.querySelector("#out").textContent = "готово"');
-  assert.equal(doc.querySelector('#out').textContent, 'готово');
+  await img.exec('document.querySelector("#out").textContent = "done"');
+  assert.equal(doc.querySelector('#out').textContent, 'done');
 });
 
-test('exec возвращает ошибку, а не бросает', async () => {
+test('exec returns an error rather than throwing', async () => {
   const { img } = makeImage();
-  const r = await img.exec('нетТакогоОбъекта.поле');
+  const r = await img.exec('noSuchObject.field');
   assert.equal(r.ok, false);
   assert.ok(r.error.length > 0);
 });
 
-test('exec без return не даёт значения', async () => {
+test('exec without a return yields no value', async () => {
   const { img } = makeImage();
   const r = await img.exec('const x = 1;');
   assert.equal(r.ok, true);
   assert.equal(r.value, undefined);
 });
 
-test('значение усекается до 10000 символов', async () => {
+test('a value is truncated to 10000 characters', async () => {
   const { img } = makeImage();
-  const r = await img.exec('return "я".repeat(20000)');
+  const r = await img.exec('return "y".repeat(20000)');
   assert.equal(r.value.length, 10000);
 });
 
-test('snapshot переносит живое значение поля в разметку', async () => {
+test("snapshot carries a field's live value into the markup", async () => {
   const { img, doc } = makeImage();
-  doc.querySelector('#q').value = 'набрано';
-  assert.ok(img.snapshot().includes('набрано'));
+  doc.querySelector('#q').value = 'typed in';
+  assert.ok(img.snapshot().includes('typed in'));
 });
 
-test('snapshot не мутирует живой DOM', async () => {
+test('snapshot does not mutate the live DOM', async () => {
   const { img, doc } = makeImage();
   const q = doc.querySelector('#q');
-  q.value = 'набрано';
+  q.value = 'typed in';
   img.snapshot();
   assert.equal(q.getAttribute('value'), null);
 });
 
-test('handle отвечает на exec сообщением result с тем же id', async () => {
+test('handle answers exec with a result message carrying the same id', async () => {
   const { img, sent } = makeImage();
   await img.handle({ type: 'exec', id: 7, code: 'return 5' });
   assert.deepEqual(sent.at(-1), { type: 'result', id: 7, ok: true, value: '5', error: undefined });
 });
 
-// --- Дополнительно к плану ---
+// --- Beyond the plan ---
 
-test('exec работает с асинхронным кодом модели (await внутри)', async () => {
+test("exec works with the model's asynchronous code (an await inside)", async () => {
   const { img } = makeImage();
-  const r = await img.exec('await new Promise(r => setTimeout(r, 1)); return "готово"');
+  const r = await img.exec('await new Promise(r => setTimeout(r, 1)); return "done"');
   assert.equal(r.ok, true);
-  assert.equal(r.value, 'готово');
+  assert.equal(r.value, 'done');
 });
 
-test('exec сериализует объект в разбираемый JSON, а не [object Object]', async () => {
+test('exec serializes an object into parseable JSON, not [object Object]', async () => {
   const { img } = makeImage();
-  const r = await img.exec('return ({а: 1})');
+  const r = await img.exec('return ({a: 1})');
   assert.equal(r.ok, true);
-  assert.deepEqual(JSON.parse(r.value), { а: 1 });
+  assert.deepEqual(JSON.parse(r.value), { a: 1 });
 });
 
-test('exec не роняется на циклической ссылке', async () => {
+test('exec does not crash on a circular reference', async () => {
   const { img } = makeImage();
   const r = await img.exec('const o = {}; o.o = o; return o');
   assert.equal(r.ok, true);
   assert.ok(typeof r.value === 'string' && r.value.length > 0);
 });
 
-test('handle игнорирует мусор и ничего не отправляет', async () => {
+test('handle ignores garbage and sends nothing', async () => {
   const { img, sent } = makeImage();
   await img.handle(null);
   await img.handle({});
-  await img.handle({ type: 'неизвестно' });
+  await img.handle({ type: 'unknown' });
   assert.deepEqual(sent, []);
 });
 
-test('snapshot переносит checked у флажка и selected у опции', async () => {
+test("snapshot carries a checkbox's checked and an option's selected", async () => {
   const { img, doc } = makeImage(
     '<input id="c" type="checkbox">' +
     '<select id="s"><option value="a">a</option><option value="b">b</option></select>'
@@ -109,9 +109,9 @@ test('snapshot переносит checked у флажка и selected у опц�
   assert.ok(/value="b"[^>]*selected/.test(html));
 });
 
-test('ошибка исполнения не роняет execDepth — следующий exec работает нормально', async () => {
+test('an execution error does not strand execDepth — the next exec works normally', async () => {
   const { img } = makeImage();
-  const bad = await img.exec('нетТакогоОбъекта.поле');
+  const bad = await img.exec('noSuchObject.field');
   assert.equal(bad.ok, false);
   const good = await img.exec('return 42');
   assert.equal(good.ok, true);
@@ -130,33 +130,33 @@ function key(dom, doc, init) {
     { key: 'Enter', bubbles: true, cancelable: true, ...init }));
 }
 
-test('Ctrl+Enter в образе просит оболочку отправить ход', () => {
+test('Ctrl+Enter in the image asks the shell to commit a turn', () => {
   const { dom, doc, commits } = installed(() => true);
   key(dom, doc, { ctrlKey: true });
   assert.equal(commits().length, 1);
 });
 
-test('Cmd+Enter работает так же', () => {
+test('Cmd+Enter works the same way', () => {
   const { dom, doc, commits } = installed(() => true);
   key(dom, doc, { metaKey: true });
   assert.equal(commits().length, 1);
 });
 
-test('Enter без модификатора ход не запускает', () => {
+test('Enter without a modifier does not start a turn', () => {
   const { dom, doc, commits } = installed(() => true);
   key(dom, doc, {});
   assert.equal(commits().length, 0);
 });
 
-test('другая клавиша с Ctrl ход не запускает', () => {
+test('another key with Ctrl does not start a turn', () => {
   const { dom, doc, commits } = installed(() => true);
   doc.querySelector('#q').dispatchEvent(new dom.window.KeyboardEvent('keydown',
     { key: 'a', ctrlKey: true, bubbles: true }));
   assert.equal(commits().length, 0);
 });
 
-test('синтетический Ctrl+Enter от кода модели игнорируется', () => {
+test("a synthetic Ctrl+Enter from the model's code is ignored", () => {
   const { dom, doc, commits } = installed(e => e.isTrusted);
   key(dom, doc, { ctrlKey: true });
-  assert.equal(commits().length, 0, 'модель не должна отправлять ход за человека');
+  assert.equal(commits().length, 0, 'the model must not commit a turn on the human behalf');
 });

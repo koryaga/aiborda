@@ -1,2 +1,9 @@
 node_modules/
 .aiborda/
+
+# Working notes: specs, plans and brainstorms stay local, out of the repo.
+PLAN.md
+TODO.md
+docs/superpowers/
+docs/pi-plugin-web-brainstorm.md
+docs/alternative-pi-plugin.md

@@ -1,11 +1,11 @@
-// Превращает события сессии pi в поток для stdout.
+// Turns pi session events into a stream for stdout.
 //
-// Зачем отдельный файл: сама печать — один вызов write, а вот решение, что
-// именно печатать, зависит от формы события и стоит того, чтобы быть чистой
-// функцией под тестами.
+// Why a separate file: printing itself is a single write call, but the decision
+// about what exactly to print depends on the shape of the event and is worth
+// having as a pure function under tests.
 //
-// Формы событий сняты с типов pi:
-//   message_update       { assistantMessageEvent }  — токен-левел поток
+// The event shapes are taken from pi's types:
+//   message_update       { assistantMessageEvent }  — token-level stream
 //   tool_execution_start { toolName, args }
 //   tool_execution_end   { toolName, result, isError }
 
@@ -17,7 +17,7 @@ function oneLine(s, limit = 200) {
   return flat.length > limit ? flat.slice(0, limit) + '…' : flat;
 }
 
-// Результат инструмента — AgentToolResult: { content: [{type:'text', text}] }
+// A tool result is an AgentToolResult: { content: [{type:'text', text}] }
 function resultText(result) {
   if (typeof result === 'string') return result;
   const parts = result?.content;
@@ -32,7 +32,8 @@ export function formatEvent(ev, { color = true } = {}) {
   if (ev.type === 'message_update') {
     const a = ev.assistantMessageEvent;
     if (!a?.delta) return null;
-    // Рассуждения приглушаем, а не прячем: без них непонятно, жив ли ход.
+    // Reasoning is dimmed, not hidden: without it there is no telling whether
+    // the turn is still alive.
     if (a.type === 'thinking_delta') return dim(a.delta);
     if (a.type === 'text_delta') return a.delta;
     return null;
@@ -53,9 +54,10 @@ export function formatEvent(ev, { color = true } = {}) {
   return null;
 }
 
-// Какой поток идёт сейчас: мысли или ответ. Нужно, чтобы разделить их
-// переводом строки — иначе они слипаются в одну кашу, и без цвета
-// (например, в файле лога) не понять, где кончилось одно и началось другое.
+// Which stream is running right now: thinking or answer. Needed to separate
+// them with a newline — otherwise they run together into one blob, and without
+// color (in a log file, say) there is no telling where one ended and the other
+// began.
 export function streamKind(ev) {
   if (ev?.type !== 'message_update') return null;
   const t = ev.assistantMessageEvent?.type;
