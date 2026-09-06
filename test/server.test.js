@@ -15,11 +15,11 @@ async function withServer(opts, fn) {
   try { await fn(`http://127.0.0.1:${app.port}`, app); } finally { await app.close(); }
 }
 
-// Пишет HTTP-запрос напрямую в сокет, минуя WHATWG URL-парсинг, который делает
-// fetch() на клиенте (и который уже сам схлопывает "../"). Так строка запроса
-// доходит до сервера ровно в том виде, в каком написана здесь. Host по
-// умолчанию — правильный (127.0.0.1:port), чтобы проба тестировала именно то,
-// что заявлено в её названии, а не отлетала на проверке Host раньше времени.
+// Writes an HTTP request straight into the socket, bypassing the WHATWG URL
+// parsing that fetch() does on the client (and which already collapses ".."
+// itself). That way the request line reaches the server exactly as written
+// here. The Host defaults to the correct one (127.0.0.1:port) so that a probe
+// tests what its name says rather than bouncing off the Host check early.
 function rawRequest(port, target, { host } = {}) {
   const hostHeader = host ?? `127.0.0.1:${port}`;
   return new Promise((resolve, reject) => {
@@ -41,11 +41,12 @@ function rawRequest(port, target, { host } = {}) {
   });
 }
 
-test('запрос с чужим Host отклоняется 403, с правильным (127.0.0.1 или localhost) — проходит', async () => {
-  // Петля — не граница. Домен атакующего, резолвящийся в 127.0.0.1, заставляет
-  // браузер жертвы слать сюда запросы с чужим Host — это и DNS rebinding, и
-  // межсайтовый POST (CORS запрещает читать ответ, а не отправлять запрос;
-  // preflight простой POST не требует). Ответ должен зависеть от Host.
+test('a request with a foreign Host is rejected with 403, one with the right Host (127.0.0.1 or localhost) goes through', async () => {
+  // The loopback is not a boundary. An attacker's domain that resolves to
+  // 127.0.0.1 makes the victim's browser send requests here with a foreign
+  // Host — that covers both DNS rebinding and a cross-site POST (CORS forbids
+  // reading the response, not sending the request; a simple POST needs no
+  // preflight). The answer must depend on the Host.
   await withServer({}, async (base, app) => {
     const bad = await rawRequest(app.port, '/api/config', { host: 'evil.example:80' });
     assert.equal(bad.status, 403);
@@ -58,20 +59,20 @@ test('запрос с чужим Host отклоняется 403, с прави�
   });
 });
 
-test('второй listen() на занятый порт отклоняется, не роняя процесс', async () => {
+test('a second listen() on a busy port is rejected without bringing the process down', async () => {
   const app1 = createApp({});
   const app2 = createApp({});
   try {
     await app1.listen(0, 0);
-    // imgPort у app2 — тоже 0 (а не занятый app1.imagePort и не дефолтный
-    // 8731): иначе успешный bind второго порта app2 остался бы висеть
-    // непойманным сокетом до конца прогона тестов — assert.rejects ловит
-    // отказ Promise.all по первому упавшему промису, но не отменяет и не
-    // закрывает уже поднявшийся сосед.
+    // app2's imgPort is 0 as well (not app1.imagePort, which is taken, and not
+    // the default 8731): otherwise a successful bind of app2's second port
+    // would be left hanging as an uncaught socket until the end of the run —
+    // assert.rejects catches the Promise.all rejection from the first failing
+    // promise, but neither cancels nor closes the neighbour that did come up.
     await assert.rejects(() => app2.listen(app1.port, 0), e => e.code === 'EADDRINUSE');
-    // До фикса необработанное 'error'-событие на сервере убивало весь процесс
-    // node --test (а не только эту проверку) — здесь просто убеждаемся, что
-    // app1 как ни в чём не бывало продолжает отвечать.
+    // Before the fix, an unhandled 'error' event on the server killed the whole
+    // node --test process (not just this check) — here we simply confirm that
+    // app1 carries on answering as if nothing happened.
     const res = await fetch(`http://127.0.0.1:${app1.port}/api/config`);
     assert.equal(res.status, 200);
   } finally {
@@ -80,27 +81,27 @@ test('второй listen() на занятый порт отклоняется,
   }
 });
 
-test('GET // с некорректным путём получает 400 (ветка была живой, но не покрытой)', async () => {
+test('GET // with a malformed path gets a 400 (the branch was live but uncovered)', async () => {
   await withServer({}, async (base, app) => {
     const { status } = await rawRequest(app.port, '//');
     assert.equal(status, 400);
   });
 });
 
-test('serveStatic: .html/.css с правильным content-type, / отдаёт index.html, файл без точки — octet-stream, кириллица в имени раскодируется', async () => {
+test('serveStatic: .html/.css with the right content-type, / serves index.html, a file with no dot is octet-stream, a non-ASCII name is decoded', async () => {
   const webRoot = await mkdtemp(join(tmpdir(), 'aiborda-web-'));
   try {
-    await writeFile(join(webRoot, 'index.html'), '<!doctype html><title>дом-агент</title>', 'utf8');
+    await writeFile(join(webRoot, 'index.html'), '<!doctype html><title>dom agent</title>', 'utf8');
     await writeFile(join(webRoot, 'style.css'), 'body { color: red }', 'utf8');
     const binBody = Buffer.from([0, 1, 2, 9, 253, 254, 255]);
     await writeFile(join(webRoot, 'noext'), binBody);
-    await writeFile(join(webRoot, 'файл.html'), '<p>кириллица в имени файла</p>', 'utf8');
+    await writeFile(join(webRoot, 'café.html'), '<p>a non-ASCII file name</p>', 'utf8');
 
     await withServer({ webRoot }, async base => {
       const idx = await fetch(base + '/');
       assert.equal(idx.status, 200);
       assert.match(idx.headers.get('content-type'), /text\/html/);
-      assert.equal(await idx.text(), '<!doctype html><title>дом-агент</title>');
+      assert.equal(await idx.text(), '<!doctype html><title>dom agent</title>');
 
       const css = await fetch(base + '/style.css');
       assert.equal(css.status, 200);
@@ -112,9 +113,9 @@ test('serveStatic: .html/.css с правильным content-type, / отдаё
       assert.equal(noext.headers.get('content-type'), 'application/octet-stream');
       assert.deepEqual(Buffer.from(await noext.arrayBuffer()), binBody);
 
-      const cyr = await fetch(base + '/' + encodeURIComponent('файл.html'));
-      assert.equal(cyr.status, 200, 'кириллическое имя файла должно раскодироваться и находиться на диске');
-      assert.equal(await cyr.text(), '<p>кириллица в имени файла</p>');
+      const nonAscii = await fetch(base + '/' + encodeURIComponent('café.html'));
+      assert.equal(nonAscii.status, 200, 'a non-ASCII file name must be decoded and found on disk');
+      assert.equal(await nonAscii.text(), '<p>a non-ASCII file name</p>');
     });
   } finally {
     await rm(webRoot, { recursive: true, force: true });
@@ -135,8 +136,8 @@ async function readSse(res) {
   return out;
 }
 
-// Поток может начинаться служебным снимком модели, поэтому потребители
-// page_exec не должны считать, что их событие обязательно первое в SSE.
+// The stream may open with a service snapshot of the model, so consumers of
+// page_exec must not assume their event is necessarily first in the SSE.
 async function readPageExecId(reader) {
   const dec = new TextDecoder();
   let buf = '';
@@ -147,7 +148,7 @@ async function readPageExecId(reader) {
     const m = /event: page_exec\ndata: \{"type":"page_exec","id":"(p\d+)"/.exec(buf);
     if (m) return m[1];
   }
-  throw new Error('в потоке не найден page_exec: ' + buf);
+  throw new Error('no page_exec found in the stream: ' + buf);
 }
 
 function post(base, body) {
@@ -157,8 +158,8 @@ function post(base, body) {
   });
 }
 
-// Подставная сессия для тестов ниже: не ходит к настоящей модели, только
-// запоминает вызовы. Используется через opts.sessionFactory.
+// A stub session for the tests below: it never goes to a real model, it only
+// records the calls. Used through opts.sessionFactory.
 function stubSession(calls, extra = {}) {
   return async () => ({
     session: {
@@ -172,9 +173,9 @@ function stubSession(calls, extra = {}) {
   });
 }
 
-// --- Задача 4: ход через сессию pi ---
+// --- Task 4: a turn through the pi session ---
 
-test('commit запускает ход и отдаёт поток', async () => {
+test('commit starts a turn and returns a stream', async () => {
   const calls = [];
   const app = createApp({
     sessionFactory: async () => ({
@@ -191,15 +192,15 @@ test('commit запускает ход и отдаёт поток', async () => 
   try {
     const res = await fetch(`http://127.0.0.1:${app.port}/api/commit`, {
       method: 'POST', headers: { 'content-type': 'application/json' },
-      body: JSON.stringify({ diff: '#q  "" -> "привет"' }),
+      body: JSON.stringify({ diff: '#q  "" -> "hello"' }),
     });
     assert.equal(res.status, 200);
     await res.text();
-    assert.equal(calls[0], '#q  "" -> "привет"');
+    assert.equal(calls[0], '#q  "" -> "hello"');
   } finally { await app.close(); }
 });
 
-test('abort доходит до сессии', async () => {
+test('abort reaches the session', async () => {
   const calls = [];
   const app = createApp({
     sessionFactory: async () => ({
@@ -211,26 +212,26 @@ test('abort доходит до сессии', async () => {
   try {
     await fetch(`http://127.0.0.1:${app.port}/api/commit`, {
       method: 'POST', headers: { 'content-type': 'application/json' },
-      body: JSON.stringify({ diff: 'д' }),
+      body: JSON.stringify({ diff: 'x' }),
     }).then(r => r.text());
     await fetch(`http://127.0.0.1:${app.port}/api/abort`, { method: 'POST' });
     assert.ok(calls.includes('abort'));
   } finally { await app.close(); }
 });
 
-test('результат page_exec с чужим id отбрасывается, сервер жив', async () => {
+test('a page_exec result with a foreign id is discarded, the server stays alive', async () => {
   const app = createApp({});
   await app.listen(0, 0);
   try {
     const res = await fetch(`http://127.0.0.1:${app.port}/api/page-result`, {
       method: 'POST', headers: { 'content-type': 'application/json' },
-      body: JSON.stringify({ id: 'нет-такого', ok: true, value: 'x' }),
+      body: JSON.stringify({ id: 'no-such-id', ok: true, value: 'x' }),
     });
     assert.equal(res.status, 200);
   } finally { await app.close(); }
 });
 
-test('выбранная pi модель доходит до уже подключённой оболочки', async () => {
+test('the model chosen by pi reaches an already connected shell', async () => {
   const model = { provider: 'pi', id: 'saved-default' };
   const app = createApp({
     sessionFactory: async () => ({
@@ -246,7 +247,7 @@ test('выбранная pi модель доходит до уже подклю
 
     await fetch(`http://127.0.0.1:${app.port}/api/commit`, {
       method: 'POST', headers: { 'content-type': 'application/json' },
-      body: JSON.stringify({ diff: 'д' }),
+      body: JSON.stringify({ diff: 'x' }),
     }).then(r => r.text());
 
     const text = new TextDecoder().decode((await reader.read()).value);
@@ -258,7 +259,7 @@ test('выбранная pi модель доходит до уже подклю
   }
 });
 
-test('новая SSE-подписка получает уже выбранную pi модель', async () => {
+test('a new SSE subscription receives the model pi has already chosen', async () => {
   const model = { provider: 'pi', id: 'saved-default' };
   const app = createApp({
     sessionFactory: async () => ({
@@ -269,10 +270,11 @@ test('новая SSE-подписка получает уже выбранную
   await app.listen(0, 0);
   let reader = null;
   try {
-    // Имитируем уже закончившийся warmup: модель выбрана до подключения SSE.
+    // Simulate a warmup that already finished: the model is chosen before SSE
+    // connects.
     await fetch(`http://127.0.0.1:${app.port}/api/commit`, {
       method: 'POST', headers: { 'content-type': 'application/json' },
-      body: JSON.stringify({ diff: 'д' }),
+      body: JSON.stringify({ diff: 'x' }),
     }).then(r => r.text());
 
     const events = await fetch(`http://127.0.0.1:${app.port}/api/events`);
@@ -286,7 +288,7 @@ test('новая SSE-подписка получает уже выбранную
   }
 });
 
-test('page_exec от модели доходит до подписчика SSE и возвращается результатом', async () => {
+test('a page_exec from the model reaches the SSE subscriber and comes back as a result', async () => {
   let callPage = null;
   const app = createApp({
     sessionFactory: async ({ callPage: fn }) => {
@@ -298,20 +300,20 @@ test('page_exec от модели доходит до подписчика SSE �
   await app.listen(0, 0);
   let reader = null;
   try {
-    // подписываемся на события, как это делает оболочка
+    // subscribe to events the way the shell does
     const es = await fetch(`http://127.0.0.1:${app.port}/api/events`);
     reader = es.body.getReader();
     const dec = new TextDecoder();
 
-    // поднимаем сессию — она создаётся лениво при первом ходе
+    // bring the session up — it is created lazily on the first turn
     await fetch(`http://127.0.0.1:${app.port}/api/commit`, {
       method: 'POST', headers: { 'content-type': 'application/json' },
-      body: JSON.stringify({ diff: 'д' }),
+      body: JSON.stringify({ diff: 'x' }),
     }).then(r => r.text());
 
     const pending = callPage('return 2 + 2');
-    // Читаем, пока не увидим кадр с запросом: в потоке могут идти и другие
-    // события, и один read() не обязан вернуть целый кадр.
+    // Read until we see the frame with the request: other events may travel in
+    // the stream, and a single read() need not return a whole frame.
     let buf = '', m = null;
     for (let i = 0; i < 10 && !m; i++) {
       const { value, done } = await reader.read();
@@ -319,7 +321,7 @@ test('page_exec от модели доходит до подписчика SSE �
       buf += dec.decode(value, { stream: true });
       m = /"id":"(p\d+)"/.exec(buf);
     }
-    assert.ok(m, 'в потоке должен быть запрос page_exec с id: ' + buf);
+    assert.ok(m, 'the stream should carry a page_exec request with an id: ' + buf);
 
     await fetch(`http://127.0.0.1:${app.port}/api/page-result`, {
       method: 'POST', headers: { 'content-type': 'application/json' },
@@ -327,36 +329,37 @@ test('page_exec от модели доходит до подписчика SSE �
     });
     assert.deepEqual(await pending, { ok: true, value: '4' });
   } finally {
-    // Отпускаем поток до close(): иначе открытое соединение держит сервер,
-    // и при упавшем ассерте close() ждёт его вечно — тест виснет вместо падения.
+    // Release the stream before close(): otherwise the open connection holds
+    // the server, and on a failed assert close() waits for it forever — the
+    // test hangs instead of failing.
     try { await reader?.cancel(); } catch {}
     await app.close();
   }
 });
 
-test('заголовки потока: /api/commit отвечает text/event-stream', async () => {
+test('stream headers: /api/commit answers with text/event-stream', async () => {
   await withServer({ sessionFactory: stubSession([]) }, async base => {
-    const res = await post(base, { diff: 'д' });
+    const res = await post(base, { diff: 'x' });
     assert.match(res.headers.get('content-type'), /text\/event-stream/);
     await res.text();
   });
 });
 
-test('битое тело запроса не роняет сервер', async () => {
+test('a broken request body does not bring the server down', async () => {
   await withServer({ sessionFactory: stubSession([]) }, async base => {
     const bad = await fetch(base + '/api/commit', {
       method: 'POST', headers: { 'content-type': 'application/json' },
-      body: 'это не json {{{',
+      body: 'this is not json {{{',
     });
     assert.notEqual(bad.status, 200);
-    // Сервер должен остаться живым — следующий нормальный запрос обязан пройти.
-    const ok = await post(base, { diff: 'д' });
+    // The server must stay alive — the next normal request has to go through.
+    const ok = await post(base, { diff: 'x' });
     assert.equal(ok.status, 200);
     await ok.text();
   });
 });
 
-test('/api/abort без активного хода не падает и отдаёт ok', async () => {
+test('/api/abort with no turn in progress does not fail and returns ok', async () => {
   await withServer({}, async base => {
     const res = await fetch(base + '/api/abort', { method: 'POST' });
     assert.equal(res.status, 200);
@@ -364,26 +367,26 @@ test('/api/abort без активного хода не падает и отд�
   });
 });
 
-// --- Дополнительно к плану: устойчивость канала page_exec ---
+// --- Beyond the plan: resilience of the page_exec channel ---
 
-test('сессия не поднимается (нет модели/ключа) — commit отдаёт error-событие, сервер жив', async () => {
+test('the session fails to come up (no model/key) — commit emits an error event, the server stays alive', async () => {
   await withServer({
-    sessionFactory: async () => { throw new Error('нет доступной модели'); },
+    sessionFactory: async () => { throw new Error('no model available'); },
   }, async base => {
-    const res = await post(base, { diff: 'д' });
+    const res = await post(base, { diff: 'x' });
     assert.equal(res.status, 200);
     assert.match(res.headers.get('content-type'), /text\/event-stream/);
     const events = await readSse(res);
     assert.equal(events.at(-1).event, 'error');
-    assert.ok(events.at(-1).data.message.includes('нет доступной модели'));
+    assert.ok(events.at(-1).data.message.includes('no model available'));
 
-    // сервер жив — обычный маршрут всё ещё отвечает
+    // the server is alive — an ordinary route still answers
     const alive = await fetch(base + '/api/abort', { method: 'POST' });
     assert.equal(alive.status, 200);
   });
 });
 
-test('оболочка отключилась посреди хода: вызов page_exec отклоняется, сервер жив', async () => {
+test('the shell disconnected mid-turn: the page_exec call is rejected, the server stays alive', async () => {
   let callPage = null;
   await withServer({
     sessionFactory: async ({ callPage: fn }) => {
@@ -394,20 +397,20 @@ test('оболочка отключилась посреди хода: вызо�
   }, async base => {
     const ctrl = new AbortController();
     await fetch(base + '/api/events', { signal: ctrl.signal });
-    await post(base, { diff: 'д' }).then(r => r.text()); // поднимает сессию
+    await post(base, { diff: 'x' }).then(r => r.text()); // brings the session up
 
-    ctrl.abort(); // оболочка отключилась — единственный подписчик ушёл
-    await new Promise(r => setTimeout(r, 100)); // дать серверу обработать close
+    ctrl.abort(); // the shell disconnected — the only subscriber is gone
+    await new Promise(r => setTimeout(r, 100)); // let the server process the close
 
-    await assert.rejects(callPage('return 1'), /отключилась|не подключена/);
+    await assert.rejects(callPage('return 1'), /disconnected|not connected/);
 
-    // сервер жив: обычный маршрут всё ещё отвечает
+    // the server is alive: an ordinary route still answers
     const alive = await fetch(base + '/api/abort', { method: 'POST' });
     assert.equal(alive.status, 200);
   });
 });
 
-test('два подписчика SSE: запрос уходит в оба, повторный ответ с тем же id не путает мост', async () => {
+test('two SSE subscribers: the request goes to both, a duplicate answer with the same id does not confuse the bridge', async () => {
   let callPage = null;
   await withServer({
     sessionFactory: async ({ callPage: fn }) => {
@@ -420,22 +423,23 @@ test('два подписчика SSE: запрос уходит в оба, по
     const es2 = await fetch(base + '/api/events');
     const r1 = es1.body.getReader();
     const r2 = es2.body.getReader();
-    await post(base, { diff: 'д' }).then(r => r.text());
+    await post(base, { diff: 'x' }).then(r => r.text());
 
     const pending = callPage('return 1 + 1');
     const id1 = await readPageExecId(r1);
     const id2 = await readPageExecId(r2);
-    assert.ok(id1, 'первый подписчик должен получить запрос page_exec');
-    assert.equal(id1, id2, 'оба подписчика получают один и тот же запрос с одним id');
+    assert.ok(id1, 'the first subscriber should receive the page_exec request');
+    assert.equal(id1, id2, 'both subscribers get the same request with the same id');
 
     await fetch(base + '/api/page-result', {
       method: 'POST', headers: { 'content-type': 'application/json' },
       body: JSON.stringify({ id: id1, ok: true, value: '2' }),
     });
-    // запоздавший ответ второго подписчика с тем же id — сервер не должен споткнуться
+    // a late answer from the second subscriber with the same id — the server
+    // must not trip over it
     const dup = await fetch(base + '/api/page-result', {
       method: 'POST', headers: { 'content-type': 'application/json' },
-      body: JSON.stringify({ id: id1, ok: true, value: 'другой ответ' }),
+      body: JSON.stringify({ id: id1, ok: true, value: 'a different answer' }),
     });
     assert.equal(dup.status, 200);
     assert.deepEqual(await pending, { ok: true, value: '2' });
@@ -444,7 +448,7 @@ test('два подписчика SSE: запрос уходит в оба, по
   });
 });
 
-test('переподключение оболочки восстанавливает канал page_exec', async () => {
+test('the shell reconnecting restores the page_exec channel', async () => {
   let callPage = null;
   await withServer({
     sessionFactory: async ({ callPage: fn }) => {
@@ -453,20 +457,20 @@ test('переподключение оболочки восстанавлива
         abort: async () => {}, waitForIdle: async () => {}, dispose: () => {} } };
     },
   }, async base => {
-    await post(base, { diff: 'д' }).then(r => r.text()); // поднимает сессию
+    await post(base, { diff: 'x' }).then(r => r.text()); // brings the session up
 
     const ctrl = new AbortController();
     await fetch(base + '/api/events', { signal: ctrl.signal });
     ctrl.abort();
     await new Promise(r => setTimeout(r, 100));
-    await assert.rejects(callPage('a'), /отключилась|не подключена/);
+    await assert.rejects(callPage('a'), /disconnected|not connected/);
 
-    // переподключение — новый SSE-запрос должен снова принимать запросы
+    // reconnect — a new SSE request must accept requests again
     const es2 = await fetch(base + '/api/events');
     const reader = es2.body.getReader();
     const pending = callPage('return 3');
     const id = await readPageExecId(reader);
-    assert.ok(id, 'после переподключения сервер снова должен слать запросы в SSE');
+    assert.ok(id, 'after reconnecting the server must send requests into the SSE again');
 
     await fetch(base + '/api/page-result', {
       method: 'POST', headers: { 'content-type': 'application/json' },
@@ -477,45 +481,45 @@ test('переподключение оболочки восстанавлива
   });
 });
 
-test('выход за пределы web/ запрещён: обходы через сырой сокет, минуя нормализацию клиента', async () => {
-  // web/ ещё не существует по умолчанию (DEFAULT_WEB_ROOT), поэтому единственный
-  // файл, который реально можно было бы прочитать через обход наружу — это
-  // package.json репозитория (он на один уровень выше web/). Если бы контейнмент
-  // был сломан, один из этих запросов вернул бы 200 с его содержимым.
+test('escaping web/ is forbidden: traversals over a raw socket, bypassing client-side normalisation', async () => {
+  // web/ does not exist yet by default (DEFAULT_WEB_ROOT), so the only file
+  // that could realistically be read by escaping outwards is the repository's
+  // package.json (it sits one level above web/). If containment were broken,
+  // one of these requests would return 200 with its contents.
   const real = await readFile(fileURLToPath(new URL('../package.json', import.meta.url)), 'utf8');
-  assert.ok(real.includes(PACKAGE_JSON_NEEDLE), 'сверочная строка должна быть в реальном package.json');
+  assert.ok(real.includes(PACKAGE_JSON_NEEDLE), 'the reference string must be in the real package.json');
 
   await withServer({}, async (base, app) => {
     const probes = [
-      '/../package.json',              // буквальный ".." — new URL() клэмпит его к корню ещё при разборе pathname
-      '/%2e%2e/package.json',          // процентное кодирование точек — WHATWG URL распознаёт %2e как "." при поиске dot-сегментов
-      '/%2e%2e%2fpackage.json',        // точки и слэш закодированы вместе — один сегмент на входе, после decodeURIComponent превращается в "/../package.json" и клэмпится normalize()
-      '/..%2fpackage.json',            // точки буквальные, слэш закодирован (%2f) — decodeURIComponent даёт настоящий "../", но pathname всегда абсолютный: normalize() клэмпит "../" к корню, а не выпускает выше него
-      '/..%2Fpackage.json',            // то же в верхнем регистре
-      '/..\\package.json',             // обратный слэш — для http-схемы WHATWG URL приравнивает его к "/" ещё на этапе разбора, дальше как обычный ".."
-      '/..%5cpackage.json',            // обратный слэш закодирован (нижний регистр) — после decode это буквальный символ "\" внутри имени файла (не разделитель на POSIX), ищется как один опознаваемый файл и не находится
-      '/..%5Cpackage.json',            // то же в верхнем регистре
-      '/foo/%2e%2e/%2e%2e/package.json', // вложенный обход из подкаталога
-      '/./../package.json',            // смешанные сегменты
-      '/etc/passwd',                   // абсолютный путь без обхода — ловит баг join() vs resolve()
-      '//etc/passwd',                  // "//" — WHATWG URL читает как protocol-relative: "etc" становится (фиктивным) host'ом при разборе, pathname схлопывается до "/passwd" — до логики обхода в serveStatic в привычном виде вообще не доходит
-      '/package.json%00.html',         // нулевой байт после реального имени — decodeURIComponent даёт литеральный \0 в имени, fs.readFile на таком пути бросает, ловится как 404
-      '/%00package.json',              // нулевой байт в начале имени
-      '/index.html%00',                // нулевой байт в конце
+      '/../package.json',              // a literal ".." — new URL() clamps it to the root while parsing the pathname
+      '/%2e%2e/package.json',          // percent-encoded dots — the WHATWG URL parser recognises %2e as "." when looking for dot segments
+      '/%2e%2e%2fpackage.json',        // dots and slash encoded together — one segment on input, after decodeURIComponent it becomes "/../package.json" and is clamped by normalize()
+      '/..%2fpackage.json',            // literal dots, encoded slash (%2f) — decodeURIComponent yields a real "../", but the pathname is always absolute: normalize() clamps "../" to the root instead of letting it escape
+      '/..%2Fpackage.json',            // the same in upper case
+      '/..\\package.json',             // a backslash — for the http scheme the WHATWG URL parser treats it as "/" during parsing, after which it is an ordinary ".."
+      '/..%5cpackage.json',            // an encoded backslash (lower case) — after decoding this is a literal "\" inside the file name (not a separator on POSIX); it is looked up as one recognisable file and not found
+      '/..%5Cpackage.json',            // the same in upper case
+      '/foo/%2e%2e/%2e%2e/package.json', // a nested traversal from a subdirectory
+      '/./../package.json',            // mixed segments
+      '/etc/passwd',                   // an absolute path with no traversal — catches the join() vs resolve() bug
+      '//etc/passwd',                  // "//" — the WHATWG URL parser reads this as protocol-relative: "etc" becomes a (fictitious) host during parsing, the pathname collapses to "/passwd" — it never reaches the traversal logic in serveStatic in the usual form at all
+      '/package.json%00.html',         // a null byte after the real name — decodeURIComponent yields a literal \0 in the name, fs.readFile throws on such a path, and it is caught as a 404
+      '/%00package.json',              // a null byte at the start of the name
+      '/index.html%00',                // a null byte at the end
     ];
 
     for (const target of probes) {
       const { status, body } = await rawRequest(app.port, target);
-      assert.notEqual(status, 200, `${target} не должен отдавать 200`);
-      assert.equal(status, 404, `${target} должен получить 404`);
-      assert.equal(body.includes(PACKAGE_JSON_NEEDLE), false, `${target} не должен отдать содержимое package.json`);
+      assert.notEqual(status, 200, `${target} must not return 200`);
+      assert.equal(status, 404, `${target} must get a 404`);
+      assert.equal(body.includes(PACKAGE_JSON_NEEDLE), false, `${target} must not return the contents of package.json`);
     }
   });
 });
 
-// --- Задача 3: образ на своём origin ---
+// --- Task 3: the image on its own origin ---
 
-test('образ отдаётся со второго порта', async () => {
+test('the image is served from the second port', async () => {
   const app = createApp({});
   await app.listen(0, 0);
   try {
@@ -523,13 +527,13 @@ test('образ отдаётся со второго порта', async () => {
     const res = await fetch(`http://127.0.0.1:${app.imagePort}/image.html`);
     assert.equal(res.status, 200);
     const html = await res.text();
-    assert.ok(html.includes('id="q"'), 'заготовка на месте');
-    assert.ok(html.includes('image-boot.js'), 'загрузчик подключён');
-    assert.equal(html.includes('sandbox'), false, 'атрибут sandbox не используется');
+    assert.ok(html.includes('id="q"'), 'the stub is in place');
+    assert.ok(html.includes('image-boot.js'), 'the loader is wired up');
+    assert.equal(html.includes('sandbox'), false, 'the sandbox attribute is not used');
   } finally { await app.close(); }
 });
 
-test('/api/config отдаёт origin образа', async () => {
+test("/api/config returns the image's origin", async () => {
   const app = createApp({});
   await app.listen(0, 0);
   try {
@@ -538,12 +542,12 @@ test('/api/config отдаёт origin образа', async () => {
   } finally { await app.close(); }
 });
 
-test('порт образа проверяет Host так же, как оболочка', async () => {
-  // fetch() не даёт подменить заголовок Host — undici (как и браузерный fetch)
-  // считает его запрещённым и молча шлёт настоящий адрес вместо заданного
-  // (проверено: с headers:{host:'evil.example'} на сервер всё равно приходит
-  // 127.0.0.1:port). Ровно поэтому в проверке Host у оболочки уже используется
-  // rawRequest — тот же приём нужен и здесь.
+test('the image port checks the Host the same way the shell does', async () => {
+  // fetch() will not let the Host header be overridden — undici (like the
+  // browser fetch) considers it forbidden and silently sends the real address
+  // instead of the given one (verified: with headers:{host:'evil.example'} the
+  // server still receives 127.0.0.1:port). That is exactly why the shell's Host
+  // check already uses rawRequest — the same trick is needed here.
   const app = createApp({});
   await app.listen(0, 0);
   try {
@@ -554,7 +558,7 @@ test('порт образа проверяет Host так же, как обол
   } finally { await app.close(); }
 });
 
-test('image-boot.js отдаётся со второго порта', async () => {
+test('image-boot.js is served from the second port', async () => {
   const app = createApp({});
   await app.listen(0, 0);
   try {
@@ -565,7 +569,7 @@ test('image-boot.js отдаётся со второго порта', async () =
   } finally { await app.close(); }
 });
 
-test('на порту образа "/" отдаёт image.html с правильным content-type', async () => {
+test('on the image port "/" serves image.html with the right content-type', async () => {
   const app = createApp({});
   await app.listen(0, 0);
   try {

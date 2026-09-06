@@ -28,10 +28,10 @@ function sse(res, event, data) {
   res.write(`event: ${event}\ndata: ${JSON.stringify(data)}\n\n`);
 }
 
-// Тело запроса читаем сами: встроенный http-модуль не парсит JSON.
-// Битый JSON здесь не глушится — бросает наружу, и уже вызывающий код
-// (обработчик маршрута внутри общего try/catch createServer) решает,
-// как ответить, не роняя сам процесс.
+// We read the request body ourselves: the built-in http module does not parse
+// JSON. Broken JSON is not swallowed here — it is thrown outwards, and the
+// caller (the route handler inside createServer's shared try/catch) decides
+// how to answer without bringing the process down.
 function readJson(req) {
   return new Promise((resolve, reject) => {
     const chunks = [];
@@ -39,36 +39,37 @@ function readJson(req) {
     req.on('end', () => {
       const text = Buffer.concat(chunks).toString('utf8');
       try { resolve(text ? JSON.parse(text) : {}); }
-      catch (e) { reject(new Error('некорректное тело запроса: ' + e.message)); }
+      catch (e) { reject(new Error('malformed request body: ' + e.message)); }
     });
     req.on('error', reject);
   });
 }
 
 async function serveStatic(res, pathname, root) {
-  // Порядок здесь принципиален: decodeURIComponent → normalize → join → startsWith.
-  // new URL(req.url, ...) в обработчике ниже схлопывает точечные сегменты в pathname
-  // (включая %2e-форму — это делает сам WHATWG-парсер), но проценты вообще не
-  // декодирует, а не-ASCII, наоборот, кодирует. Значит без decodeURIComponent
-  // кириллическое имя файла в web/ никогда не найдётся. decodeURIComponent может
-  // заново породить "/../" из "%2e%2e%2f" — но pathname всегда абсолютный
-  // (начинается с "/"), а normalize() на абсолютном пути клэмпит "../" к корню,
-  // а не выпускает выше него. normalize и startsWith(root) — две настоящие линии
-  // обороны; join (не resolve!) — то, что не даёт абсолютному второму аргументу
-  // переопределить базу целиком.
+  // The order matters here: decodeURIComponent → normalize → join → startsWith.
+  // new URL(req.url, ...) in the handler below collapses dot segments in the
+  // pathname (including the %2e form — the WHATWG parser does that itself), but
+  // it does not decode percent escapes at all, and it encodes non-ASCII instead.
+  // So without decodeURIComponent a non-ASCII file name in web/ would never be
+  // found. decodeURIComponent can re-create "/../" out of "%2e%2e%2f" — but the
+  // pathname is always absolute (it starts with "/"), and normalize() on an
+  // absolute path clamps "../" to the root instead of letting it escape above.
+  // normalize and startsWith(root) are the two real lines of defence; join (not
+  // resolve!) is what keeps an absolute second argument from replacing the base
+  // entirely.
   let decoded;
   try { decoded = decodeURIComponent(pathname); }
-  catch { return json(res, 400, { error: 'некорректный путь' }); }
+  catch { return json(res, 400, { error: 'malformed path' }); }
   const rel = normalize(decoded === '/' ? '/index.html' : decoded);
   const file = join(root, rel);
-  if (!file.startsWith(root)) return json(res, 404, { error: 'не найдено' });
+  if (!file.startsWith(root)) return json(res, 404, { error: 'not found' });
   try {
     const body = await readFile(file);
     const dot = rel.lastIndexOf('.');
     const ext = dot === -1 ? '' : rel.slice(dot);
     res.writeHead(200, { 'content-type': MIME[ext] ?? 'application/octet-stream' });
     res.end(body);
-  } catch { json(res, 404, { error: 'не найдено' }); }
+  } catch { json(res, 404, { error: 'not found' }); }
 }
 
 export function createApp(opts = {}) {
@@ -76,21 +77,21 @@ export function createApp(opts = {}) {
   const root = withTrailingSlash(opts.webRoot ?? DEFAULT_WEB_ROOT);
 
   const bridge = createBridge({ send: null });
-  // Поток модели идёт в stdout: видно текст, рассуждения и вызовы
-  // инструментов по мере генерации. opts.print === false глушит в тестах.
+  // The model's stream goes to stdout: text, reasoning and tool calls are
+  // visible as they are generated. opts.print === false silences it in tests.
   const printEvent = opts.print === false ? () => {} : createPrinter();
 
-  // Модель ведёт pi: своей конфигурации у нас нет, поэтому просто спрашиваем
-  // сессию. До первого хода сессии ещё нет — тогда null.
+  // pi owns the model: we have no configuration of our own, so we simply ask
+  // the session. Before the first turn there is no session yet — then null.
   const modelRef = () => {
     const m = state.session?.model;
     return m ? { provider: m.provider, id: m.id } : null;
   };
   const listeners = new Set();
 
-  // Оболочка держит открытый SSE; по нему сервер шлёт запросы page_exec и
-  // события сессии. Обратный ход — обычным POST: WebSocket-сервера в Node нет,
-  // а тянуть ws ради одного канала не стоит.
+  // The shell holds an open SSE; over it the server sends page_exec requests
+  // and session events. The way back is a plain POST: Node has no WebSocket
+  // server, and pulling in ws for a single channel is not worth it.
   function broadcast(event, data) {
     for (const res of listeners) {
       try { sse(res, event, data); } catch { listeners.delete(res); }
@@ -102,9 +103,10 @@ export function createApp(opts = {}) {
     const factory = opts.sessionFactory ?? startSession;
     const { session } = await factory({ callPage: code => bridge.call(code) });
     state.session = session;
-    // Модель уже выбрана внутри createAgentSession().  Это не сопровождается
-    // событием model_select, поэтому сами публикуем начальное значение: иначе
-    // оболочка, успевшая прочитать /api/config до warmup(), навсегда покажет «—».
+    // The model has already been chosen inside createAgentSession(). That does
+    // not come with a model_select event, so we publish the initial value
+    // ourselves: otherwise a shell that managed to read /api/config before
+    // warmup() would show "—" forever.
     broadcast('model', modelRef());
     session.subscribe(ev => {
       if (!ev?.type) return;
@@ -122,10 +124,11 @@ export function createApp(opts = {}) {
       'cache-control': 'no-cache',
       connection: 'keep-alive',
     });
-    // ensureSession() — внутри try, а не до writeHead: если сессия не поднимается
-    // (нет модели, нет ключа), это должно уйти событием error внутри уже начатого
-    // потока, а не сорвать ответ обратно в JSON 500 из внешнего catch — оболочка
-    // ждёт именно SSE на этом маршруте.
+    // ensureSession() sits inside the try, not before writeHead: if the session
+    // fails to come up (no model, no key), that has to leave as an error event
+    // inside the stream that already started, rather than derailing the reply
+    // back into a JSON 500 from the outer catch — the shell expects SSE on this
+    // route.
     try {
       const session = await ensureSession();
       await session.prompt(String(body.diff ?? ''));
@@ -143,20 +146,21 @@ export function createApp(opts = {}) {
     try { url = new URL(req.url, 'http://127.0.0.1'); }
     catch {
       if (res.headersSent) return res.destroy();
-      return json(res, 400, { error: 'некорректный запрос' });
+      return json(res, 400, { error: 'malformed request' });
     }
 
-    // Петля — не граница. Домен атакующего, резолвящийся в 127.0.0.1 (DNS
-    // rebinding), заставляет браузер жертвы слать сюда запросы с чужим Host —
-    // и это может быть чтение (текста ошибки с именем пользователя ОС в пути)
-    // или запись (/api/commit). Межсайтовый POST — simple request, preflight
-    // не нужен; CORS запрещает читать чужой ответ, а не отправлять запрос,
-    // так что отсутствие CORS-заголовков само по себе не защита. Отвечаем
-    // только тогда, когда клиент целился именно в этот адрес.
+    // The loopback is not a boundary. An attacker's domain that resolves to
+    // 127.0.0.1 (DNS rebinding) makes the victim's browser send requests here
+    // with a foreign Host — and that can be a read (an error message with the
+    // OS user name in the path) or a write (/api/commit). A cross-site POST is
+    // a simple request, no preflight needed; CORS forbids reading someone
+    // else's response, not sending the request, so the absence of CORS headers
+    // is not a defence in itself. We only answer when the client aimed at this
+    // very address.
     const port = server.address()?.port;
     const allowedHosts = new Set([`127.0.0.1:${port}`, `localhost:${port}`]);
     if (!allowedHosts.has(String(req.headers.host).toLowerCase())) {
-      return json(res, 403, { error: 'недопустимый Host' });
+      return json(res, 403, { error: 'disallowed Host' });
     }
 
     try {
@@ -174,27 +178,27 @@ export function createApp(opts = {}) {
           'cache-control': 'no-cache',
           connection: 'keep-alive',
         });
-        // writeHead() сам по себе ничего не отправляет в сокет — Node копит
-        // заголовки до первого write()/end(). Здесь до первого события может
-        // пройти сколько угодно времени (страница ждёт запроса page_exec),
-        // так что без явного flushHeaders() клиент завис бы в ожидании самого
-        // статуса ответа, а не только данных.
+        // writeHead() by itself sends nothing to the socket — Node buffers the
+        // headers until the first write()/end(). Here any amount of time can
+        // pass before the first event (the page is waiting for a page_exec
+        // request), so without an explicit flushHeaders() the client would hang
+        // waiting for the response status itself, not just for data.
         res.flushHeaders();
         listeners.add(res);
-        // SSE подключается после первого /api/config. Если warmup успел
-        // завершиться между этими двумя запросами, начальное broadcast выше
-        // уже прошло без слушателей; снапшот закрывает это окно гонки.
+        // SSE connects after the first /api/config. If warmup finished between
+        // those two requests, the initial broadcast above went out with no
+        // listeners; this snapshot closes that race window.
         if (state.session) sse(res, 'model', modelRef());
-        // Каждое новое подключение переустанавливает отправителя моста — это и
-        // есть восстановление канала после переподключения оболочки (п.3
-        // «Дополнительно к плану»): пока хотя бы один слушатель жив, мост может
-        // слать запросы; на закрытии последнего — немеет и отклоняет ожидающих.
+        // Every new connection re-installs the bridge's sender — that is how
+        // the channel is restored after the shell reconnects: as long as at
+        // least one listener is alive the bridge can send requests; when the
+        // last one closes it goes mute and rejects everything pending.
         bridge.setSender(m => broadcast('page_exec', m));
         req.on('close', () => {
           listeners.delete(res);
           if (listeners.size === 0) {
             bridge.setSender(null);
-            bridge.reset('оболочка отключилась');
+            bridge.reset('the shell disconnected');
           }
         });
         return;
@@ -203,7 +207,7 @@ export function createApp(opts = {}) {
         bridge.deliver(await readJson(req));
         return json(res, 200, { ok: true });
       }
-      if (url.pathname.startsWith('/api/')) return json(res, 404, { error: 'нет такого метода' });
+      if (url.pathname.startsWith('/api/')) return json(res, 404, { error: 'no such method' });
       return await serveStatic(res, url.pathname, root);
     } catch (e) {
       if (res.headersSent) return res.destroy();
@@ -211,24 +215,25 @@ export function createApp(opts = {}) {
     }
   });
 
-  // Образ живёт на отдельном порту, и это весь механизм изоляции: другой
-  // origin даёт ему localStorage и остальной HTML5, но не даёт достать до
-  // оболочки. Атрибут sandbox не используется — он дал бы меньше и хуже.
+  // The image lives on its own port, and that is the whole isolation
+  // mechanism: a different origin gives it localStorage and the rest of HTML5,
+  // but does not let it reach the shell. The sandbox attribute is not used —
+  // it would give less, and worse.
   const imageServer = createServer(async (req, res) => {
     let url;
     try { url = new URL(req.url, 'http://127.0.0.1'); }
     catch {
       if (res.headersSent) return res.destroy();
-      return json(res, 400, { error: 'некорректный запрос' });
+      return json(res, 400, { error: 'malformed request' });
     }
     const p = imageServer.address()?.port;
     const allowed = new Set([`127.0.0.1:${p}`, `localhost:${p}`]);
     if (!allowed.has(String(req.headers.host).toLowerCase())) {
-      return json(res, 403, { error: 'недопустимый Host' });
+      return json(res, 403, { error: 'disallowed Host' });
     }
     const path = url.pathname === '/' ? '/image.html' : url.pathname;
-    // `root` — уже вычисленная в createApp константа с завершающим слэшем,
-    // а не сырой opts.webRoot: на слэше держится проверка startsWith.
+    // `root` is the constant already computed in createApp, with a trailing
+    // slash — not the raw opts.webRoot: the startsWith check rests on that slash.
     return await serveStatic(res, path, root);
   });
 
@@ -244,8 +249,9 @@ export function createApp(opts = {}) {
       });
       return Promise.all([up(server, port), up(imageServer, imgPort)]);
     },
-    // Поднять сессию заранее, чтобы имя модели было известно до первого хода.
-    // Зовётся только из точки входа: тесты создают сессию своей заглушкой.
+    // Bring the session up ahead of time so the model name is known before the
+    // first turn. Called only from the entry point: tests create the session
+    // with their own stub.
     warmup: () => ensureSession(),
     close() {
       return Promise.all([
@@ -259,12 +265,12 @@ export function createApp(opts = {}) {
 if (fileURLToPath(import.meta.url) === process.argv[1]) {
   const app = createApp({});
   await app.listen(8730, 8731);
-  console.log('aiborda слушает http://127.0.0.1:8730, образ — http://127.0.0.1:8731');
+  console.log('aiborda is listening on http://127.0.0.1:8730, the image on http://127.0.0.1:8731');
   try {
     const s = await app.warmup();
     const m = s.model;
-    console.log('модель:', m ? `${m.provider}/${m.id}` : '(не определена)');
+    console.log('model:', m ? `${m.provider}/${m.id}` : '(undetermined)');
   } catch (e) {
-    console.log('сессия не поднялась:', e.message);
+    console.log('the session did not come up:', e.message);
   }
 }

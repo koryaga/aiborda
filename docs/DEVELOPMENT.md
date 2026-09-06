@@ -1,172 +1,175 @@
-# aiborda — для разработчиков
+# aiborda — for developers
 
-Техническая документация: архитектура, устройство протокола, известные
-слабости. Пользовательский README — [../README.md](../README.md).
+Technical documentation: architecture, how the protocol works, known
+weaknesses. The user-facing README is [../README.md](../README.md).
 
-Агент, который общается с человеком через HTML-страницу. Человек правит
-страницу руками — в полях, через `contenteditable`, через инструменты
-разработчика браузера — и нажимает «отправить». Модель получает **диф правок**
-и отвечает изменением той же страницы.
+An agent that talks to a human through an HTML page. The human edits the page
+by hand — in fields, through `contenteditable`, through the browser developer
+tools — and presses "send". The model receives a **diff of the edits** and
+answers by changing the same page.
 
-Ядро — SDK инструмента `@earendil-works/pi-coding-agent`. Модель работает
-обычными инструментами: `bash`, чтение и запись файлов, `web_fetch`, память,
-субагенты — и одним нашим, `page_exec`, для работы со страницей.
+The core is the `@earendil-works/pi-coding-agent` SDK. The model works with
+the usual tools — `bash`, reading and writing files, `web_fetch`, memory,
+subagents — plus one of ours, `page_exec`, for working with the page.
 
-Два инварианта:
+Two invariants:
 
-1. **Модель всемогуща снаружи и достаёт до страницы только через `page_exec`.
-   Страница до оболочки не достаёт.** Изоляцию обеспечивает разделение по
-   origin, а не песочница.
-2. **Диф — единственный автоматический канал восприятия.** Снимок страницы не
-   отправляется модели никогда. Если ей нужно состояние, она читает его сама
-   вызовом `page_exec`.
+1. **The model is all-powerful on the outside and reaches the page only
+   through `page_exec`. The page cannot reach the shell.** Isolation comes
+   from origin separation, not from a sandbox.
+2. **The diff is the only automatic channel of perception.** A snapshot of the
+   page is never sent to the model. If it needs the state, it reads it itself
+   with a `page_exec` call.
 
-Спецификация: [superpowers/specs/2026-08-20-pi-core-redesign-design.md](superpowers/specs/2026-08-20-pi-core-redesign-design.md).
-История первой архитектуры — в [2026-08-19-dom-agent-design.md](superpowers/specs/2026-08-19-dom-agent-design.md)
-(файл сохранил старое имя проекта — исторический документ).
+## Running it
 
-## Запуск
-
-Нужен Node ≥ 20 и настроенный `pi`: модель, ключи и настройки берутся из
-`~/.pi/agent`, отдельной конфигурации у aiborda нет.
+You need Node ≥ 20 and a configured `pi`: the model, the keys and the settings
+all come from `~/.pi/agent`; aiborda has no configuration of its own.
 
 ```bash
 npm install
 npm start
 ```
 
-Открыть `http://127.0.0.1:8730`.
+Open `http://127.0.0.1:8730`.
 
-## Два порта — и это весь механизм изоляции
+## Two ports — and that is the whole isolation mechanism
 
-| порт | что отдаёт |
+| port | what it serves |
 |---|---|
-| 8730 | оболочка: кнопка «отправить», индикатор хода, имя модели |
-| 8731 | образ: страница, с которой работают человек и модель |
+| 8730 | the shell: the "send" button, the turn indicator, the model name |
+| 8731 | the image: the page the human and the model work with |
 
-Разные порты — разные origin. Отсюда сразу и то, и другое:
+Different ports mean different origins. That gives both of the following at
+once:
 
-- у образа **работает весь HTML5**: `localStorage`, `sessionStorage`,
+- the image has **all of HTML5 working**: `localStorage`, `sessionStorage`,
   `indexedDB`, `cookie`, `isSecureContext: true`
-- образ **не достаёт до оболочки**: `parent.document` бросает `SecurityError`,
-  запрос к origin оболочки — `TypeError`
-- `event.origin` в оболочке — настоящий адрес образа, а не `null`, поэтому
-  проверка отправителя стала осмысленной; сверка `event.source` и совпадения
-  `id` осталась рядом с ней
+- the image **cannot reach the shell**: `parent.document` throws a
+  `SecurityError`, a request to the shell's origin throws a `TypeError`
+- `event.origin` in the shell is the image's real address rather than `null`,
+  which makes the sender check meaningful; the `event.source` check and the
+  `id` match stayed alongside it
 
-Атрибут `sandbox` не используется. Он дал бы меньше: `allow-same-origin`
-открывает хранилища ценой полного доступа к оболочке, включая возможность
-снять собственный `sandbox`.
+The `sandbox` attribute is not used. It would give less: `allow-same-origin`
+unlocks the storages at the price of full access to the shell, including the
+ability to strip its own `sandbox`.
 
-Сервер слушает только петлю и проверяет заголовок `Host` на обоих портах:
-одного `bind` к `127.0.0.1` мало, потому что домен атакующего, резолвящийся
-в `127.0.0.1`, даёт его странице читать ответы как свои.
+The server listens on the loopback only and checks the `Host` header on both
+ports: binding to `127.0.0.1` is not enough on its own, because an attacker's
+domain that resolves to `127.0.0.1` lets their page read the responses as its
+own.
 
-## Где живёт контракт с моделью
+## Where the contract with the model lives
 
-- `AGENTS.md` в корне — продуктовая рамка и правила поведения. pi читает его
-  как контекстный файл. В каждом каталоге берётся **первый попавшийся** из
-  `AGENTS.override.md`, `AGENTS.md`, `AGENTS.MD`, `CLAUDE.md`, `CLAUDE.MD`;
-  сначала глобальный из `~/.pi/agent/`, затем от корня вниз по предкам.
-  **`README.md` контекстным файлом не является** — этот файл модель не видит.
-- `promptGuidelines` и `promptSnippet` у инструмента `page_exec` в
-  `server/agent.js` — механика: что читать, где хранить состояние, откуда
-  берутся правки человека.
+- `AGENTS.md` in the root — the product framing and the rules of behaviour. pi
+  reads it as a context file. In each directory it takes the **first one it
+  finds** out of `AGENTS.override.md`, `AGENTS.md`, `AGENTS.MD`, `CLAUDE.md`,
+  `CLAUDE.MD`; first the global one from `~/.pi/agent/`, then from the root
+  down through the ancestors. **`README.md` is not a context file** — the model
+  never sees it.
+- `promptGuidelines` and `promptSnippet` on the `page_exec` tool in
+  `server/agent.js` — the mechanics: what to read, where to keep state, where
+  the human's edits come from.
 
-Отдельного системного промпта у нас нет и не требуется: у
-`createAgentSession` такого поля не предусмотрено, а оба пути выше — штатные.
-Базовый промпт собирает сам pi, наши строки встают в его разделы
-«Available tools» и «Guidelines».
+We have no separate system prompt and need none: `createAgentSession` has no
+such field, and both paths above are the supported ones. pi assembles the base
+prompt itself, and our lines slot into its "Available tools" and "Guidelines"
+sections.
 
-## Разрешения
+## Permissions
 
-**Гейтов нет.** Инструменты доступны модели сразу, включая `bash` и `write`.
-Это осознанное решение для первой версии: агент имеет полномочия пользователя
-на машине, как `pi` без подтверждений.
+**There are no gates.** The tools are available to the model straight away,
+including `bash` and `write`. This is a deliberate decision for the first
+version: the agent has the user's authority on the machine, like `pi` without
+confirmations.
 
-Прямое следствие: prompt injection — значимый риск, как только модель начнёт
-читать содержимое чужих сайтов. Смягчений сейчас нет.
+The direct consequence: prompt injection is a significant risk as soon as the
+model starts reading the contents of third-party sites. There are no
+mitigations at present.
 
-## Устройство
+## Layout
 
 ```
 server/
-  index.js       два HTTP-сервера, SSE вниз, POST вверх, статика
-  agent.js       сессия pi и инструмент page_exec
-  bridge.js      сопоставление запросов к образу с ответами
+  index.js       two HTTP servers, SSE down, POST up, static files
+  agent.js       the pi session and the page_exec tool
+  bridge.js      matching requests to the image with their answers
 web/
-  index.html     оболочка
-  shell.js       ход, EventSource, обмен с образом
-  image.html     образ: заготовка страницы
-  image-boot.js  наблюдатель мутаций, атрибуция, сборка дифа, снапшот
+  index.html     the shell
+  shell.js       the turn, EventSource, exchange with the image
+  image.html     the image: the page stub
+  image-boot.js  mutation observer, attribution, diff building, snapshot
   style.css
-AGENTS.md        контракт с моделью
+AGENTS.md        the contract with the model
 ```
 
-### Как идёт ход
+### How a turn goes
 
 ```
-человек правит страницу
-  ↓ «отправить»
-оболочка просит у образа диф  (postMessage)
+the human edits the page
+  ↓ "send"
+the shell asks the image for a diff  (postMessage)
   ↓ POST /api/commit
-сервер зовёт session.prompt(диф)
-  ↓ модель решает и вызывает page_exec
-сервер → оболочка (SSE) → образ (postMessage) → обратно POST /api/page-result
+the server calls session.prompt(diff)
+  ↓ the model decides and calls page_exec
+server → shell (SSE) → image (postMessage) → back via POST /api/page-result
 ```
 
-Модель может вызвать `page_exec`, `bash`, `read`, `write`, `web_fetch` сколько
-угодно раз внутри одного хода. Чтение состояния не стоит отдельного хода:
-`page_exec` и читает, и меняет.
+The model can call `page_exec`, `bash`, `read`, `write` and `web_fetch` as
+many times as it likes within a single turn. Reading state does not cost a
+separate turn: `page_exec` both reads and writes.
 
-Канал сервер → образ сделан на SSE вниз и POST вверх, а не на WebSocket: в
-Node есть WebSocket-клиент, но нет сервера, а пакет `ws` стал бы первой
-зависимостью помимо pi.
+The server → image channel is built on SSE down and POST up rather than a
+WebSocket: Node has a WebSocket client but no server, and the `ws` package
+would become the first dependency besides pi.
 
-### Как ловятся правки человека
+### How the human's edits are captured
 
-`web/image-boot.js` — самая тонкая часть проекта, перенесённая из первой вехи
-без изменений. Правки через DevTools не порождают событий вовсе, поэтому
-основа — `MutationObserver`; живой набор в поле меняет свойство `.value`,
-которого наблюдатель не видит, поэтому для полей отдельно слушаются `focusin`,
-`input` и `change`.
+`web/image-boot.js` is the subtlest part of the project, carried over from the
+first milestone unchanged. Edits made through DevTools produce no events at
+all, so the foundation is `MutationObserver`; live typing into a field changes
+the `.value` property, which the observer does not see, so fields additionally
+listen for `focusin`, `input` and `change`.
 
-Правки модели отсекаются по окну исполнения `page_exec`, а не по `isTrusted`.
-Коалесцирование обязательно: `getAttribute()` в момент доставки записи
-возвращает текущее значение, а не значение на момент мутации.
+The model's own edits are filtered out by the `page_exec` execution window,
+not by `isTrusted`. Coalescing is mandatory: `getAttribute()` at the moment a
+record is delivered returns the current value, not the value at the time of
+the mutation.
 
-## Клавиатура
+## Keyboard
 
-`Ctrl+Enter` или `Cmd+Enter` — отправить ход. Поле ввода однострочное и
-очищается сразу после отправки — атомарно со сборкой дифа, внутри образа:
-будь это отдельным сообщением, человек успел бы набрать в промежутке и текст
-пропал бы. Заодно пересевается baseline, иначе следующий диф сообщил бы
-«было ‹только что отправленное›». Работает и когда фокус в поле
-ввода внутри образа: событие клавиатуры оттуда в оболочку не всплывает, это
-разные origin, поэтому образ сам сообщает о нажатии сообщением `commit`.
-Синтетические события отсекаются по `isTrusted`, чтобы код модели не отправлял
-ход за человека.
+`Ctrl+Enter` or `Cmd+Enter` sends the turn. The input field is single-line and
+is cleared right after sending — atomically with building the diff, inside the
+image: as a separate message the human could type something in between and the
+text would be lost. The baseline is re-seeded at the same time; otherwise the
+next diff would report "was ‹what was just sent›". This works even when focus
+is in the input field inside the image: a keyboard event does not bubble from
+there up into the shell, since they are different origins, so the image
+reports the press itself with a `commit` message. Synthetic events are
+filtered out by `isTrusted` so that the model's code cannot send a turn on the
+human's behalf.
 
-## Отладка
+## Debugging
 
-Поток модели идёт в вывод `node`: текст, рассуждения приглушённым цветом и
-вызовы инструментов с аргументами — по мере генерации.
+The model's stream goes to the `node` output: text, reasoning in a dimmed
+colour, and tool calls with arguments — as they are generated.
 
 ```bash
 npm start
 ```
 
 ```
-модель: openrouter/nvidia/nemotron-3-ultra-550b-a55b:free
+model: openrouter/nvidia/nemotron-3-ultra-550b-a55b:free
 
-The user wants me to write the word "готово" into the #out element…
+The user wants me to write the word "done" into the #out element…
 → page_exec {"code":"const out = document.getElementById('out');…"}
-← page_exec Done: wrote "готово" to #out
+← page_exec Done: wrote "done" to #out
 
-Готово — слово «готово» записано в `#out`.
+Done — the word "done" has been written into `#out`.
 ```
 
-Полная история ходов лежит в транскриптах, которые пишет сам pi:
+The full history of turns lives in the transcripts pi writes itself:
 
 ```bash
 npm run log
@@ -176,56 +179,58 @@ npm run log
 node log.mjs -f
 ```
 
-## Тесты
+## Tests
 
 ```bash
 npm test
 ```
 
-127 тестов на `node:test`. Тесты образа выполняют **тот же текст**
-`image-boot.js`, который грузится в браузере, — через `new Function` в jsdom.
-Ни один тест не ходит в сеть и не обращается к модели: сессия подставляется
-через `sessionFactory`, ответы образа — через мост.
+129 tests on `node:test`. The image tests execute **the very same text** of
+`image-boot.js` that the browser loads, through `new Function` in jsdom. No
+test goes to the network or talks to a model: the session is substituted via
+`sessionFactory`, and the image's answers come through the bridge.
 
-## Проверено вживую
+## Verified live
 
-Ход целиком: человек набрал «сделай список из трёх пунктов», модель вызвала
-`page_exec`, три пункта появились в странице. Двадцать пять секунд.
+A full turn: the human typed "make a list of three items", the model called
+`page_exec`, three items appeared on the page. Twenty-five seconds.
 
-Постоянное хранилище: «запомни в localStorage под ключом name что меня зовут
-Сергей» — значение записано и видно из отдельной вкладки на origin образа.
+Persistent storage: "remember in localStorage under the key name that my name
+is Sergey" — the value was written and is visible from a separate tab on the
+image's origin.
 
-Выход наружу: «через bash узнай сколько файлов в текущем каталоге и покажи
-число в #out» — модель сходила в `bash`, посчитала и написала ответ на
-страницу.
+Reaching outwards: "use bash to find out how many files are in the current
+directory and show the number in #out" — the model went to `bash`, counted,
+and wrote the answer onto the page.
 
-## Известные слабости
+## Known weaknesses
 
-- **Prompt injection** при чтении чужих сайтов — гейтов нет.
-- **Правка человека по тому же узлу, который правит модель**, во время хода
-  будет списана на модель и потеряется. `MutationObserver` не сообщает
-  авторства; атрибуция идёт по окну исполнения с грейсом.
-- **Диф теряется при сетевом сбое**: образ очищает буферы в момент сборки, до
-  того как станет известно, дошёл ли запрос.
-- **Текст модели виден только в выводе `node`**, не в странице. Индикатор
-  показывает лишь факт «идёт ход».
-- **Выбор модели убран из интерфейса** — имя показано рядом с кнопкой, но
-  сменить её из страницы нельзя. Вернётся отдельной задачей через
-  `session.setModel` и `session.cycleModel`.
-- **Две вкладки на одном сервере** делят одну сессию и один мост; вторая
-  вкладка получит чужие запросы `page_exec`.
-- **Код модели может подделать сообщение `commit`** и запустить ход. Фильтр по
-  `isTrusted` в образе закрывает путь через синтетический keydown, но прямой
-  `parent.postMessage` не закрывает ничем. Ущерб ограничен: во время хода
-  `commit()` выходит сразу, а диф будет пустым — правки модели в него не идут.
+- **Prompt injection** when reading third-party sites — there are no gates.
+- **A human edit to the same node the model is editing** during a turn will be
+  attributed to the model and lost. `MutationObserver` does not report
+  authorship; attribution goes by the execution window plus a grace period.
+- **The diff is lost on a network failure**: the image clears its buffers at
+  build time, before it is known whether the request arrived.
+- **The model's text is visible only in the `node` output**, not on the page.
+  The indicator shows only the fact that a turn is running.
+- **Model selection has been removed from the interface** — the name is shown
+  next to the button, but it cannot be changed from the page. It will come
+  back as a separate task via `session.setModel` and `session.cycleModel`.
+- **Two tabs on one server** share a single session and a single bridge; the
+  second tab will receive `page_exec` requests meant for the first.
+- **The model's code can forge a `commit` message** and start a turn. The
+  `isTrusted` filter in the image closes the synthetic-keydown route, but
+  nothing closes a direct `parent.postMessage`. The damage is limited: during
+  a turn `commit()` returns straight away, and the diff will be empty — the
+  model's own edits do not go into it.
 
-## Две вещи, о которые стоит не споткнуться
+## Two things worth not tripping over
 
-**`node --test test/` не работает на Node 26.5.0** — раннер пытается
-разрешить директорию как модуль. В `package.json` стоит `node --test` без
-пути; автопоиск находит те же файлы.
+**`node --test test/` does not work on Node 26.5.0** — the runner tries to
+resolve the directory as a module. `package.json` has a bare `node --test`
+with no path; auto-discovery finds the same files.
 
-**Пути с пробелами.** `new URL(...).pathname` отдаёт процентно-кодированный
-путь, а `import.meta.url === \`file://${process.argv[1]}\`` даёт `false` — из-за
-второго `npm start` молча завершался бы, ничего не запустив. Везде
-используется `fileURLToPath`.
+**Paths with spaces.** `new URL(...).pathname` returns a percent-encoded path,
+and ``import.meta.url === `file://${process.argv[1]}` `` evaluates to `false` —
+because of the second one, `npm start` would exit silently without starting
+anything. `fileURLToPath` is used everywhere.

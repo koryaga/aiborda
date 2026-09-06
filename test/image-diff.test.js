@@ -16,19 +16,20 @@ function makeImage(html, grace = 0) {
   return { dom, doc: dom.window.document, img, sent };
 }
 
-// M11: хелпер рядом с makeImage вместо семи повторов dispatchEvent(focusin).
+// M11: a helper next to makeImage instead of seven repeats of
+// dispatchEvent(focusin).
 function focusIn(dom, el) {
   el.dispatchEvent(new dom.window.Event('focusin', { bubbles: true }));
 }
 
-test('правка атрибута попадает в диф', async () => {
+test('an attribute edit lands in the diff', async () => {
   const { doc, img } = makeImage('<div id="out" class="v1"></div>');
   doc.querySelector('#out').setAttribute('class', 'v2');
   await tick();
   assert.equal(img.buildDiff(), '#out  @class: "v1" -> "v2"');
 });
 
-test('две правки одного атрибута дают одну строку со старым от первой', async () => {
+test('two edits of one attribute give one line with the old value from the first', async () => {
   const { doc, img } = makeImage('<div id="out" class="v1"></div>');
   const el = doc.querySelector('#out');
   el.setAttribute('class', 'v2');
@@ -38,7 +39,7 @@ test('две правки одного атрибута дают одну стр
   assert.equal(img.buildDiff(), '#out  @class: "v1" -> "v3"');
 });
 
-test('правка, вернувшая прежнее значение, в диф не идёт', async () => {
+test('an edit that restored the previous value does not go into the diff', async () => {
   const { doc, img } = makeImage('<div id="out" class="v1"></div>');
   const el = doc.querySelector('#out');
   el.setAttribute('class', 'v2');
@@ -48,24 +49,24 @@ test('правка, вернувшая прежнее значение, в ди�
   assert.equal(img.buildDiff(), '');
 });
 
-test('удаление узла попадает в диф вместе с его HTML и родителем', async () => {
-  const { doc, img } = makeImage('<ul id="items"><li id="row-2">второй</li></ul>');
+test('a node removal lands in the diff together with its HTML and its parent', async () => {
+  const { doc, img } = makeImage('<ul id="items"><li id="row-2">second</li></ul>');
   doc.querySelector('#row-2').remove();
   await tick();
-  assert.equal(img.buildDiff(), 'удалён из #items: <li id="row-2">второй</li>');
+  assert.equal(img.buildDiff(), 'removed from #items: <li id="row-2">second</li>');
 });
 
-test('добавление узла попадает в диф', async () => {
+test('a node addition lands in the diff', async () => {
   const { doc, img } = makeImage('<ul id="items"></ul>');
   const li = doc.createElement('li');
   li.id = 'row-3';
-  li.textContent = 'третий';
+  li.textContent = 'third';
   doc.querySelector('#items').append(li);
   await tick();
-  assert.equal(img.buildDiff(), 'добавлен в #items: <li id="row-3">третий</li>');
+  assert.equal(img.buildDiff(), 'added to #items: <li id="row-3">third</li>');
 });
 
-test('узел, добавленный и сразу удалённый, в дифе не появляется', async () => {
+test('a node added and immediately removed does not show up in the diff', async () => {
   const { doc, img } = makeImage('<ul id="items"></ul>');
   const li = doc.createElement('li');
   doc.querySelector('#items').append(li);
@@ -75,31 +76,31 @@ test('узел, добавленный и сразу удалённый, в ди
   assert.equal(img.buildDiff(), '');
 });
 
-test('правка текста попадает в диф с путём через nth-child', async () => {
-  const { doc, img } = makeImage('<ul id="items"><li>первый</li></ul>');
-  doc.querySelector('#items li').firstChild.data = 'первый пункт';
+test('a text edit lands in the diff with an nth-child path', async () => {
+  const { doc, img } = makeImage('<ul id="items"><li>first</li></ul>');
+  doc.querySelector('#items li').firstChild.data = 'first item';
   await tick();
-  assert.equal(img.buildDiff(), '#items > li:nth-child(1)  текст: "первый" -> "первый пункт"');
+  assert.equal(img.buildDiff(), '#items > li:nth-child(1)  text: "first" -> "first item"');
 });
 
-test('мутации кода модели в диф не попадают', async () => {
+test("mutations from the model's code do not land in the diff", async () => {
   const { img } = makeImage('<div id="out"></div>');
-  await img.exec('document.querySelector("#out").setAttribute("class", "модель")');
+  await img.exec('document.querySelector("#out").setAttribute("class", "model")');
   await tick();
   assert.equal(img.buildDiff(), '');
 });
 
-test('живой ввод в поле попадает в диф', async () => {
+test('live typing into a field lands in the diff', async () => {
   const { doc, img, dom } = makeImage('<textarea id="q"></textarea>');
   const q = doc.querySelector('#q');
   focusIn(dom, q);
-  q.value = 'посчитай маржу';
+  q.value = 'work out the margin';
   q.dispatchEvent(new dom.window.Event('input', { bubbles: true }));
   await tick();
-  assert.equal(img.buildDiff(), '#q  "" -> "посчитай маржу"');
+  assert.equal(img.buildDiff(), '#q  "" -> "work out the margin"');
 });
 
-test('после сборки буферы пусты и повторный диф пуст', async () => {
+test('after a build the buffers are empty and a repeat diff is empty', async () => {
   const { doc, img } = makeImage('<div id="out" class="v1"></div>');
   doc.querySelector('#out').setAttribute('class', 'v2');
   await tick();
@@ -107,35 +108,35 @@ test('после сборки буферы пусты и повторный ди
   assert.equal(img.buildDiff(), '');
 });
 
-// --- Дополнительно к плану (первый круг ревью) ---
+// --- Beyond the plan (first review round) ---
 
-test('два текстовых потомка одного родителя дают две строки, а не одну', async () => {
-  const { doc, img } = makeImage('<p id="p">первый<span>x</span>второй</p>');
+test('two text children of one parent give two lines, not one', async () => {
+  const { doc, img } = makeImage('<p id="p">first<span>x</span>second</p>');
   const p = doc.querySelector('#p');
-  p.firstChild.data = 'изменён-первый';
-  p.lastChild.data = 'изменён-второй';
+  p.firstChild.data = 'changed-first';
+  p.lastChild.data = 'changed-second';
   await tick();
   const lines = img.buildDiff().split('\n');
   assert.equal(lines.length, 2);
-  assert.ok(lines.some(l => l.includes('"первый" -> "изменён-первый"')));
-  assert.ok(lines.some(l => l.includes('"второй" -> "изменён-второй"')));
+  assert.ok(lines.some(l => l.includes('"first" -> "changed-first"')));
+  assert.ok(lines.some(l => l.includes('"second" -> "changed-second"')));
 });
 
-test('перемещение узла даёт добавление, но не удаление', async () => {
-  const { doc, img } = makeImage('<ul id="a"><li id="row">строка</li></ul><ul id="b"></ul>');
+test('moving a node gives an addition but no removal', async () => {
+  const { doc, img } = makeImage('<ul id="a"><li id="row">a row</li></ul><ul id="b"></ul>');
   const row = doc.querySelector('#row');
   doc.querySelector('#b').append(row);
   await tick();
   const diff = img.buildDiff();
-  assert.ok(!diff.includes('удалён'), 'не должно быть строки про удаление: ' + diff);
-  assert.equal(diff, 'добавлен в #b: <li id="row">строка</li>');
+  assert.ok(!diff.includes('removed'), 'there should be no removal line: ' + diff);
+  assert.equal(diff, 'added to #b: <li id="row">a row</li>');
 });
 
-test('правка человека вперемешку с правкой модели: в дифе только человеческие узлы', async () => {
+test("a human edit interleaved with the model's: only the human's nodes are in the diff", async () => {
   const { doc, img } = makeImage('<div id="a"></div><div id="b"></div><div id="c"></div>');
   doc.querySelector('#a').setAttribute('data-x', '1');
   await tick();
-  await img.exec('document.querySelector("#b").setAttribute("data-x", "модель")');
+  await img.exec('document.querySelector("#b").setAttribute("data-x", "model")');
   await tick();
   doc.querySelector('#c').setAttribute('data-x', '2');
   await tick();
@@ -146,20 +147,20 @@ test('правка человека вперемешку с правкой мо�
   assert.ok(!lines.some(l => l.startsWith('#b')));
 });
 
-test('добавление и удаление атрибута дают читаемые null без кавычек', async () => {
+test('adding and removing an attribute gives a readable unquoted null', async () => {
   const { doc, img } = makeImage('<div id="out" class="v1"></div>');
   const el = doc.querySelector('#out');
-  el.setAttribute('data-new', 'значение');
+  el.setAttribute('data-new', 'a value');
   el.removeAttribute('class');
   await tick();
   const lines = img.buildDiff().split('\n').sort();
   assert.deepEqual(lines, [
     '#out  @class: "v1" -> null',
-    '#out  @data-new: null -> "значение"',
+    '#out  @data-new: null -> "a value"',
   ]);
 });
 
-test('фокус без изменения значения не даёт строки', async () => {
+test('focus without a change of value gives no line', async () => {
   const { doc, img, dom } = makeImage('<textarea id="q"></textarea>');
   const q = doc.querySelector('#q');
   focusIn(dom, q);
@@ -167,52 +168,54 @@ test('фокус без изменения значения не даёт стр
   assert.equal(img.buildDiff(), '');
 });
 
-test('поле, возвращённое к исходному значению, не даёт строки', async () => {
-  const { doc, img, dom } = makeImage('<textarea id="q">исходно</textarea>');
+test('a field restored to its original value gives no line', async () => {
+  const { doc, img, dom } = makeImage('<textarea id="q">original</textarea>');
   const q = doc.querySelector('#q');
-  q.value = 'исходно';
+  q.value = 'original';
   focusIn(dom, q);
-  q.value = 'изменено';
+  q.value = 'changed';
   q.dispatchEvent(new dom.window.Event('input', { bubbles: true }));
-  q.value = 'исходно';
+  q.value = 'original';
   q.dispatchEvent(new dom.window.Event('input', { bubbles: true }));
   await tick();
   assert.equal(img.buildDiff(), '');
 });
 
-test('правка поля кодом модели не попадает в диф, даже если человек ранее фокусировался в нём', async () => {
+test("a field edited by the model's code stays out of the diff, even if the human had focused it earlier", async () => {
   const { doc, img, dom } = makeImage('<textarea id="q"></textarea>');
   const q = doc.querySelector('#q');
   focusIn(dom, q);
   await tick();
-  await img.exec('document.querySelector("#q").value = "от модели"');
+  await img.exec('document.querySelector("#q").value = "from the model"');
   await tick();
   assert.equal(img.buildDiff(), '');
 });
 
-// M11: было сравнение двух прогонов между собой (проходит при любом порядке,
-// включая неверный) — заменено на точное ожидание всех строк.
-test('порядок строк устойчив: поле, атрибут, удаление — в фиксированном порядке', async () => {
+// M11: this used to compare two runs against each other (which passes under any
+// ordering, including a wrong one) — replaced with an exact expectation of
+// every line.
+test('the line order is stable: field, attribute, removal — in a fixed order', async () => {
   const { doc, img, dom } = makeImage(
-    '<textarea id="q"></textarea><div id="out" class="v1"></div><ul id="items"><li id="row">строка</li></ul>'
+    '<textarea id="q"></textarea><div id="out" class="v1"></div><ul id="items"><li id="row">a row</li></ul>'
   );
   const q = doc.querySelector('#q');
   focusIn(dom, q);
-  q.value = 'ввод';
+  q.value = 'input';
   q.dispatchEvent(new dom.window.Event('input', { bubbles: true }));
   doc.querySelector('#out').setAttribute('class', 'v2');
   doc.querySelector('#row').remove();
   await tick();
   assert.equal(
     img.buildDiff(),
-    '#q  "" -> "ввод"\n' +
+    '#q  "" -> "input"\n' +
     '#out  @class: "v1" -> "v2"\n' +
-    'удалён из #items: <li id="row">строка</li>'
+    'removed from #items: <li id="row">a row</li>'
   );
 });
 
-// M11: путь handle({type:'diff'}) не был покрыт (для exec аналогичный тест есть).
-test('handle отвечает на diff сообщением diff с текстом и тем же id', async () => {
+// M11: the handle({type:'diff'}) path was not covered (there is an equivalent
+// test for exec).
+test('handle answers a diff with a diff message carrying the text and the same id', async () => {
   const { doc, img, sent } = makeImage('<div id="out" class="v1"></div>');
   doc.querySelector('#out').setAttribute('class', 'v2');
   await tick();
@@ -220,62 +223,62 @@ test('handle отвечает на diff сообщением diff с текст�
   assert.deepEqual(sent.at(-1), { type: 'diff', id: 3, text: '#out  @class: "v1" -> "v2"' });
 });
 
-// --- Второй круг ревью: C1–C4, I5–I7, M8–M11 ---
+// --- Second review round: C1–C4, I5–I7, M8–M11 ---
 
-test('C1: человек правит другой узел во время await внутри exec — попадает в диф; правка модели — нет', async () => {
+test("C1: the human edits another node during an await inside exec — it lands in the diff; the model's edit does not", async () => {
   const { doc, img } = makeImage('<div id="a"></div><div id="b" class="v1"></div>', 50);
   const p = img.exec(
     'document.querySelector("#a").setAttribute("data-m", "1");' +
     'await new Promise(r => setTimeout(r, 30));'
   );
-  await tick(); // дать модели синхронно тронуть #a и уйти в await
-  doc.querySelector('#b').setAttribute('class', 'v2'); // "человек" правит другой узел, пока exec ещё висит
+  await tick(); // let the model touch #a synchronously and go into the await
+  doc.querySelector('#b').setAttribute('class', 'v2'); // the "human" edits another node while exec is still pending
   await p;
   await tick();
   const diff = img.buildDiff();
-  assert.ok(diff.includes('#b'), 'ожидали правку человека по #b: ' + diff);
-  assert.ok(!diff.includes('data-m'), 'правка модели не должна попасть в диф: ' + diff);
+  assert.ok(diff.includes('#b'), 'expected the human edit on #b: ' + diff);
+  assert.ok(!diff.includes('data-m'), "the model's edit must not land in the diff: " + diff);
 });
 
-test('C1: человек правит другой узел в grace-хвосте после exec — попадает в диф; правка модели — нет', async () => {
+test("C1: the human edits another node in the grace tail after exec — it lands in the diff; the model's edit does not", async () => {
   const { doc, img } = makeImage('<div id="a"></div><div id="b" class="v1"></div>', 50);
   await img.exec('document.querySelector("#a").setAttribute("data-m", "1")');
-  await tick(); // дать наблюдателю доставить запись модели, пока execDepth ещё > 0
-  doc.querySelector('#b').setAttribute('class', 'v2'); // человек правит в grace-окне
-  await wait(60); // дождаться конца grace (50мс)
+  await tick(); // let the observer deliver the model's record while execDepth is still > 0
+  doc.querySelector('#b').setAttribute('class', 'v2'); // the human edits inside the grace window
+  await wait(60); // wait out the grace (50 ms)
   const diff = img.buildDiff();
-  assert.ok(diff.includes('#b'), 'ожидали правку человека по #b: ' + diff);
-  assert.ok(!diff.includes('data-m'), 'правка модели не должна попасть в диф: ' + diff);
+  assert.ok(diff.includes('#b'), 'expected the human edit on #b: ' + diff);
+  assert.ok(!diff.includes('data-m'), "the model's edit must not land in the diff: " + diff);
 });
 
-test('C2: человек правит атрибут, затем модель — в дифе значение человека, а не модели', async () => {
+test("C2: the human edits an attribute, then the model — the diff shows the human's value, not the model's", async () => {
   const { doc, img } = makeImage('<div id="out" class="v1"></div>');
-  doc.querySelector('#out').setAttribute('class', 'человек');
+  doc.querySelector('#out').setAttribute('class', 'human');
   await tick();
-  await img.exec('document.querySelector("#out").setAttribute("class", "модель")');
+  await img.exec('document.querySelector("#out").setAttribute("class", "model")');
   await tick();
-  assert.equal(img.buildDiff(), '#out  @class: "v1" -> "человек"');
+  assert.equal(img.buildDiff(), '#out  @class: "v1" -> "human"');
 });
 
-test('C2: то же для текстового узла', async () => {
-  const { doc, img } = makeImage('<p id="p">исходно</p>');
-  doc.querySelector('#p').firstChild.data = 'человек';
+test('C2: the same for a text node', async () => {
+  const { doc, img } = makeImage('<p id="p">original</p>');
+  doc.querySelector('#p').firstChild.data = 'human';
   await tick();
-  await img.exec('document.querySelector("#p").firstChild.data = "модель"');
+  await img.exec('document.querySelector("#p").firstChild.data = "model"');
   await tick();
-  assert.equal(img.buildDiff(), '#p  текст: "исходно" -> "человек"');
+  assert.equal(img.buildDiff(), '#p  text: "original" -> "human"');
 });
 
-test('C2: обратный порядок (сначала модель, потом человек) продолжает работать верно', async () => {
+test('C2: the reverse order (model first, then human) keeps working correctly', async () => {
   const { doc, img } = makeImage('<div id="out" class="v1"></div>');
-  await img.exec('document.querySelector("#out").setAttribute("class", "модель")');
+  await img.exec('document.querySelector("#out").setAttribute("class", "model")');
   await tick();
-  doc.querySelector('#out').setAttribute('class', 'человек');
+  doc.querySelector('#out').setAttribute('class', 'human');
   await tick();
-  assert.equal(img.buildDiff(), '#out  @class: "модель" -> "человек"');
+  assert.equal(img.buildDiff(), '#out  @class: "model" -> "human"');
 });
 
-test('C3: чекбокс — поставили и сняли галочку', async () => {
+test('C3: a checkbox — ticked and unticked', async () => {
   const { doc, img, dom } = makeImage('<input id="c" type="checkbox">');
   const c = doc.querySelector('#c');
   focusIn(dom, c);
@@ -290,7 +293,7 @@ test('C3: чекбокс — поставили и сняли галочку', a
   assert.equal(img.buildDiff(), '#c  "true" -> "false"');
 });
 
-test('C3: select multiple — выбраны два варианта', async () => {
+test('C3: select multiple — two options selected', async () => {
   const { doc, img, dom } = makeImage(
     '<select id="s" multiple><option value="a">a</option><option value="b">b</option><option value="c">c</option></select>'
   );
@@ -303,101 +306,101 @@ test('C3: select multiple — выбраны два варианта', async () 
   assert.equal(img.buildDiff(), '#s  [] -> ["a","c"]');
 });
 
-test('C4: три хода подряд по одному полю без повторного фокуса — каждый раз верные "было"/"стало"', async () => {
+test('C4: three turns in a row on one field without a repeat focus — correct "was"/"now" every time', async () => {
   const { doc, img, dom } = makeImage('<textarea id="q"></textarea>');
   const q = doc.querySelector('#q');
   focusIn(dom, q);
 
-  q.value = 'привет';
+  q.value = 'hello';
   q.dispatchEvent(new dom.window.Event('input', { bubbles: true }));
   await tick();
-  assert.equal(img.buildDiff(), '#q  "" -> "привет"');
+  assert.equal(img.buildDiff(), '#q  "" -> "hello"');
 
-  q.value = 'привет мир';
+  q.value = 'hello world';
   q.dispatchEvent(new dom.window.Event('input', { bubbles: true }));
   await tick();
-  assert.equal(img.buildDiff(), '#q  "привет" -> "привет мир"');
+  assert.equal(img.buildDiff(), '#q  "hello" -> "hello world"');
 
   q.value = '';
   q.dispatchEvent(new dom.window.Event('input', { bubbles: true }));
   await tick();
-  assert.equal(img.buildDiff(), '#q  "привет мир" -> ""');
+  assert.equal(img.buildDiff(), '#q  "hello world" -> ""');
 });
 
-test('I5: узел, переставленный дважды, даёт одну строку с конечным родителем', async () => {
-  const { doc, img } = makeImage('<ul id="a"><li id="row">строка</li></ul><ul id="b"></ul>');
+test('I5: a node moved twice gives one line with its final parent', async () => {
+  const { doc, img } = makeImage('<ul id="a"><li id="row">a row</li></ul><ul id="b"></ul>');
   const row = doc.querySelector('#row');
   doc.querySelector('#b').append(row);
   doc.querySelector('#a').append(row);
   await tick();
-  assert.equal(img.buildDiff(), 'добавлен в #a: <li id="row">строка</li>');
+  assert.equal(img.buildDiff(), 'added to #a: <li id="row">a row</li>');
 });
 
-test('I6: contenteditable даёт только строку про текст, без строки про поле', async () => {
-  const { doc, img, dom } = makeImage('<div id="editor" contenteditable="true">исходно</div>');
+test('I6: contenteditable gives only the text line, with no field line', async () => {
+  const { doc, img, dom } = makeImage('<div id="editor" contenteditable="true">original</div>');
   const editor = doc.querySelector('#editor');
   focusIn(dom, editor);
-  editor.firstChild.data = 'изменено';
+  editor.firstChild.data = 'changed';
   editor.dispatchEvent(new dom.window.Event('input', { bubbles: true }));
   await tick();
-  assert.equal(img.buildDiff(), '#editor  текст: "исходно" -> "изменено"');
+  assert.equal(img.buildDiff(), '#editor  text: "original" -> "changed"');
 });
 
-test('I7: удаление многострочного элемента даёт ровно одну строку', async () => {
-  const { doc, img } = makeImage('<ul id="items"><li id="row">\n  строка с   отступами\n</li></ul>');
+test('I7: removing a multi-line element gives exactly one line', async () => {
+  const { doc, img } = makeImage('<ul id="items"><li id="row">\n  a row with   indentation\n</li></ul>');
   doc.querySelector('#row').remove();
   await tick();
-  assert.equal(img.buildDiff(), 'удалён из #items: <li id="row"> строка с   отступами </li>');
+  assert.equal(img.buildDiff(), 'removed from #items: <li id="row"> a row with   indentation </li>');
 });
 
-test('M8: поле удалено из DOM — путь помечен, значение не потеряно', async () => {
+test('M8: a field removed from the DOM — the path is flagged, the value is not lost', async () => {
   const { doc, img, dom } = makeImage('<div id="wrap"><textarea id="q"></textarea></div>');
   const q = doc.querySelector('#q');
   focusIn(dom, q);
-  q.value = 'набрано';
+  q.value = 'typed';
   q.dispatchEvent(new dom.window.Event('input', { bubbles: true }));
   q.remove();
   await tick();
   assert.equal(
     img.buildDiff(),
-    'textarea (удалён)  "" -> "набрано"\n' +
-    'удалён из #wrap: <textarea id="q"></textarea>'
+    'textarea (removed)  "" -> "typed"\n' +
+    'removed from #wrap: <textarea id="q"></textarea>'
   );
 });
 
-test('M9: дублирующийся id — путь однозначно ведёт к своему узлу', () => {
+test('M9: a duplicated id — the path unambiguously leads to its own node', () => {
   const { doc, img } = makeImage('<ul id="list"><li id="dup"></li><li id="dup"></li></ul>');
   const [first, second] = doc.querySelectorAll('#dup');
   assert.equal(doc.querySelector(img.path(first)), first);
   assert.equal(doc.querySelector(img.path(second)), second);
 });
 
-test('M9: id с пробелом — путь синтаксически валиден и ведёт к своему узлу', () => {
-  const { doc, img } = makeImage('<div id="моя строка"></div>');
-  const el = doc.querySelector('[id="моя строка"]');
+test('M9: an id with a space — the path is syntactically valid and leads to its own node', () => {
+  const { doc, img } = makeImage('<div id="my row"></div>');
+  const el = doc.querySelector('[id="my row"]');
   let resolved;
   assert.doesNotThrow(() => { resolved = doc.querySelector(img.path(el)); });
   assert.equal(resolved, el);
 });
 
-test('M10: только что добавленный узел с атрибутом и текстом даёт одну строку', async () => {
+test('M10: a just-added node with an attribute and text gives one line', async () => {
   const { doc, img } = makeImage('<ul id="items"></ul>');
   const li = doc.createElement('li');
   doc.querySelector('#items').append(li);
   li.setAttribute('class', 'x');
-  li.textContent = 'новый';
+  li.textContent = 'new one';
   await tick();
-  assert.equal(img.buildDiff(), 'добавлен в #items: <li class="x">новый</li>');
+  assert.equal(img.buildDiff(), 'added to #items: <li class="x">new one</li>');
 });
 
-test('добавленный пробельный текстовый узел в диф не идёт', async () => {
+test('an added whitespace-only text node does not go into the diff', async () => {
   const { doc, img } = makeImage('<div id="out"></div>');
   doc.querySelector('#out').append(doc.createTextNode('\n   '));
   await tick();
   assert.equal(img.buildDiff(), '');
 });
 
-test('удалённый пробельный текстовый узел в диф не идёт', async () => {
+test('a removed whitespace-only text node does not go into the diff', async () => {
   const { doc, img } = makeImage('<div id="out">\n  <span>x</span>\n</div>');
   const out = doc.querySelector('#out');
   const blank = [...out.childNodes].find(n => n.nodeType === 3 && !n.data.trim());
@@ -406,107 +409,107 @@ test('удалённый пробельный текстовый узел в д�
   assert.equal(img.buildDiff(), '');
 });
 
-test('осмысленный текст рядом с пробельным всё равно виден', async () => {
+test('meaningful text next to whitespace is still visible', async () => {
   const { doc, img } = makeImage('<div id="out"></div>');
   const out = doc.querySelector('#out');
   out.append(doc.createTextNode('\n  '));
-  out.append(doc.createTextNode('важное'));
+  out.append(doc.createTextNode('important'));
   await tick();
   const d = img.buildDiff();
-  assert.equal(d.split('\n').length, 1, 'должна остаться одна строка: ' + d);
-  assert.ok(d.includes('важное'));
+  assert.equal(d.split('\n').length, 1, 'one line should remain: ' + d);
+  assert.ok(d.includes('important'));
 });
 
-test('правка пробелов на пробелы не идёт, а на текст — идёт', async () => {
+test('whitespace edited into whitespace does not go through, whitespace into text does', async () => {
   const { doc, img } = makeImage('<div id="out">\n  <span>x</span></div>');
   const blank = [...doc.querySelector('#out').childNodes].find(n => n.nodeType === 3);
   blank.data = '\n      ';
   await tick();
-  assert.equal(img.buildDiff(), '', 'пробелы на пробелы — форматирование');
+  assert.equal(img.buildDiff(), '', 'whitespace into whitespace is formatting');
 
-  blank.data = 'теперь текст';
+  blank.data = 'now some text';
   await tick();
-  assert.ok(img.buildDiff().includes('теперь текст'), 'пробелы на текст — правка');
+  assert.ok(img.buildDiff().includes('now some text'), 'whitespace into text is an edit');
 });
 
-test('пробельный узел внутри добавленного поддерева не даёт лишних строк', async () => {
+test('a whitespace node inside an added subtree gives no extra lines', async () => {
   const { doc, img } = makeImage('<ul id="items"></ul>');
   const li = doc.createElement('li');
   li.append(doc.createTextNode('\n  '));
-  li.append(doc.createTextNode('пункт'));
+  li.append(doc.createTextNode('an item'));
   doc.querySelector('#items').append(li);
   await tick();
   const d = img.buildDiff();
-  assert.equal(d.split('\n').length, 1, 'одно добавление, а не три: ' + d);
-  assert.ok(d.startsWith('добавлен в #items'));
+  assert.equal(d.split('\n').length, 1, 'one addition, not three: ' + d);
+  assert.ok(d.startsWith('added to #items'));
 });
 
-test('clearInput очищает поле после сборки дифа', async () => {
+test('clearInput clears the field after the diff is built', async () => {
   const { doc, img, dom } = makeImage('<input id="q" type="text">');
   const q = doc.querySelector('#q');
   q.dispatchEvent(new dom.window.Event('focusin', { bubbles: true }));
-  q.value = 'отправляемое';
+  q.value = 'about to be sent';
   q.dispatchEvent(new dom.window.Event('input', { bubbles: true }));
   await tick();
 
   await img.handle({ type: 'diff', id: 1, clearInput: true });
-  assert.equal(q.value, '', 'поле должно опустеть');
+  assert.equal(q.value, '', 'the field should end up empty');
 });
 
-test('очистка не попадает в следующий диф', async () => {
+test('the clearing does not land in the next diff', async () => {
   const { doc, img, dom } = makeImage('<input id="q" type="text">');
   const q = doc.querySelector('#q');
   q.dispatchEvent(new dom.window.Event('focusin', { bubbles: true }));
-  q.value = 'первое';
+  q.value = 'the first one';
   q.dispatchEvent(new dom.window.Event('input', { bubbles: true }));
   await tick();
   await img.handle({ type: 'diff', id: 1, clearInput: true });
   await tick();
-  assert.equal(img.buildDiff(), '', 'программная очистка — не правка человека');
+  assert.equal(img.buildDiff(), '', 'a programmatic clear is not a human edit');
 });
 
-test('после очистки baseline пуст: следующий ввод сравнивается с пустотой', async () => {
-  const { doc, img, dom, sent } = makeImage('<input id="q" type="text">');
+test('after the clear the baseline is empty: the next input is compared against emptiness', async () => {
+  const { doc, img, dom } = makeImage('<input id="q" type="text">');
   const q = doc.querySelector('#q');
   q.dispatchEvent(new dom.window.Event('focusin', { bubbles: true }));
-  q.value = 'первое';
+  q.value = 'the first one';
   q.dispatchEvent(new dom.window.Event('input', { bubbles: true }));
   await tick();
   await img.handle({ type: 'diff', id: 1, clearInput: true });
 
-  // фокус из поля не уходил, повторного focusin не будет
-  q.value = 'второе';
+  // focus never left the field, so there will be no second focusin
+  q.value = 'the second one';
   q.dispatchEvent(new dom.window.Event('input', { bubbles: true }));
   await tick();
-  assert.equal(img.buildDiff(), '#q  "" -> "второе"',
-    'было должно быть пустым, а не «первое»');
+  assert.equal(img.buildDiff(), '#q  "" -> "the second one"',
+    'the "was" side should be empty, not "the first one"');
 });
 
-test('без clearInput поле не трогается', async () => {
+test('without clearInput the field is left alone', async () => {
   const { doc, img, dom } = makeImage('<input id="q" type="text">');
   const q = doc.querySelector('#q');
   q.dispatchEvent(new dom.window.Event('focusin', { bubbles: true }));
-  q.value = 'остаётся';
+  q.value = 'this stays';
   q.dispatchEvent(new dom.window.Event('input', { bubbles: true }));
   await tick();
   await img.handle({ type: 'diff', id: 1 });
-  assert.equal(q.value, 'остаётся');
+  assert.equal(q.value, 'this stays');
 });
 
-test('clearInput без поля #q не роняет образ', async () => {
+test('clearInput with no #q field does not bring the image down', async () => {
   const { img } = makeImage('<div id="out"></div>');
   await img.handle({ type: 'diff', id: 1, clearInput: true });
   assert.ok(true);
 });
 
-test('диф собран до очистки, отправленный текст в нём есть', async () => {
+test('the diff is built before the clear, so the sent text is in it', async () => {
   const { doc, img, dom, sent } = makeImage('<input id="q" type="text">');
   const q = doc.querySelector('#q');
   q.dispatchEvent(new dom.window.Event('focusin', { bubbles: true }));
-  q.value = 'важный запрос';
+  q.value = 'an important request';
   q.dispatchEvent(new dom.window.Event('input', { bubbles: true }));
   await tick();
   await img.handle({ type: 'diff', id: 7, clearInput: true });
   const msg = sent.find(m => m.type === 'diff' && m.id === 7);
-  assert.ok(msg.text.includes('важный запрос'), 'диф не должен потерять текст: ' + msg.text);
+  assert.ok(msg.text.includes('an important request'), 'the diff must not lose the text: ' + msg.text);
 });

@@ -2,7 +2,7 @@ import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { JSDOM } from 'jsdom';
 
-test('jsdom умеет MutationObserver с oldValue', async () => {
+test('jsdom supports MutationObserver with oldValue', async () => {
   const dom = new JSDOM('<div id="a" class="v1"></div>');
   const doc = dom.window.document;
   const seen = [];

@@ -1,30 +1,31 @@
 import { createAgentSession } from '@earendil-works/pi-coding-agent';
 import { Type } from 'typebox';
 
-// Тот же лимит, что уже действует в образе: значение из страницы не должно
-// уезжать в контекст модели целиком.
+// The same limit the image already enforces: a value from the page must not
+// travel into the model's context in full.
 const MAX_VALUE_LENGTH = 10000;
 
-// Контракт с моделью задаётся штатными средствами pi: promptSnippet и
-// promptGuidelines попадают в системный промпт, когда инструмент активен.
-// Продуктовая рамка — в AGENTS.md, его pi читает как контекстный файл.
+// The contract with the model is expressed through pi's own mechanisms:
+// promptSnippet and promptGuidelines land in the system prompt whenever the
+// tool is active. The product framing lives in AGENTS.md, which pi reads as a
+// context file.
 const GUIDELINES = [
-  'Страница — единственный интерфейс с человеком. Отвечай не текстом, а изменением DOM: пиши в #out, меняй элементы, создавай новые.',
-  'page_exec и читает, и меняет. Читай и меняй в одном вызове, не трать на чтение отдельный шаг.',
-  'Состояние интерфейса храни в DOM. Долговременное состояние — в localStorage: он переживает перезагрузку страницы, а DOM нет.',
-  'Заметки себе пиши в скрытый #notes.',
-  'Правки человека приходят дифом. Снимок страницы тебе не присылают — если нужно состояние, прочитай его через page_exec.',
+  'The page is the only interface with the human. Do not answer with text, answer by changing the DOM: write into #out, change elements, create new ones.',
+  'page_exec both reads and writes. Read and change in a single call; do not spend a separate step on reading.',
+  'Keep interface state in the DOM. Keep long-lived state in localStorage: it survives a page reload, the DOM does not.',
+  'Write notes to yourself into the hidden #notes.',
+  'The human\'s edits arrive as a diff. You are never sent a snapshot of the page — if you need the state, read it through page_exec.',
 ];
 
 function toText(r) {
   if (r === undefined || r === null || typeof r !== 'object') {
-    return 'выполнено, значение не возвращено';
+    return 'done, no value returned';
   }
   if (!r.ok) {
-    const err = r.error === undefined ? 'неизвестная ошибка' : String(r.error);
-    return 'ошибка исполнения: ' + err;
+    const err = r.error === undefined ? 'unknown error' : String(r.error);
+    return 'execution error: ' + err;
   }
-  if (r.value === undefined) return 'выполнено, значение не возвращено';
+  if (r.value === undefined) return 'done, no value returned';
   const text = String(r.value);
   return text.length > MAX_VALUE_LENGTH ? text.slice(0, MAX_VALUE_LENGTH) : text;
 }
@@ -32,15 +33,15 @@ function toText(r) {
 export function createPageTool(callPage) {
   return {
     name: 'page_exec',
-    label: 'Страница',
+    label: 'Page',
     description:
-      'Исполнить JavaScript в странице пользователя и вернуть результат. ' +
-      'Единственный способ читать и менять то, что видит человек. ' +
-      'Доступен весь DOM и HTML5, включая localStorage.',
-    promptSnippet: 'page_exec — читать и менять страницу пользователя',
+      'Execute JavaScript in the user\'s page and return the result. ' +
+      'The only way to read and change what the human sees. ' +
+      'The whole DOM and HTML5 are available, including localStorage.',
+    promptSnippet: 'page_exec — read and change the user\'s page',
     promptGuidelines: GUIDELINES,
     parameters: Type.Object({
-      code: Type.String({ description: 'JavaScript. Значение из return вернётся тебе.' }),
+      code: Type.String({ description: 'JavaScript. The returned value comes back to you.' }),
     }),
     executionMode: 'sequential',
     async execute(toolCallId, params) {
@@ -48,8 +49,8 @@ export function createPageTool(callPage) {
       try {
         r = await callPage(params.code);
       } catch (e) {
-        const msg = e && e.message ? e.message : 'страница недоступна';
-        return { content: [{ type: 'text', text: 'страница недоступна: ' + msg }] };
+        const msg = e && e.message ? e.message : 'page unavailable';
+        return { content: [{ type: 'text', text: 'page unavailable: ' + msg }] };
       }
       return { content: [{ type: 'text', text: toText(r) }] };
     },
