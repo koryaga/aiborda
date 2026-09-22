@@ -17,11 +17,12 @@ const setState = s => {
   dot.setAttribute('aria-label', STATES[s] ?? s);
 };
 
-// event.source is the specific window that sent the message; the model's code
-// can call parent.postMessage itself and slip in unsolicited text disguised as
-// a reply to our request, so we also check the id against the map of pending
-// requests. The origin is now a real value rather than "null" — the image lives
-// on its own port — so that check became meaningful and was added alongside.
+// event.source is the exact window that sent the message; the model's code can
+// call parent.postMessage itself and slip in unsolicited text disguised as an
+// answer to our request, so we also check the id against the map of pending
+// requests. The origin is now a real value rather than "null": the image lives
+// on its own port, which makes that check meaningful, so it was added next to
+// the others.
 addEventListener('message', e => {
   if (e.source !== frame.contentWindow) return;
   if (imageAllowedOrigin && e.origin !== imageAllowedOrigin) return;
@@ -30,11 +31,11 @@ addEventListener('message', e => {
   if (m.type === 'ready') { setState('idle'); return; }
   // The human pressed Ctrl/Cmd+Enter inside the image. The image filters out
   // synthetic events, but the model's code can still forge this message
-  // directly — the damage is limited: during a turn commit() returns
-  // immediately, and the diff would be empty anyway.
+  // directly — the damage is limited: during a turn commit() returns straight
+  // away, and the diff will be empty.
   if (m.type === 'commit') { commit(); return; }
   const p = pending.get(m.id);
-  if (!p) { say('dropped an unsolicited message from the image'); return; }
+  if (!p) { say('unsolicited message from the image discarded'); return; }
   pending.delete(m.id);
   clearTimeout(p.timer);
   p.resolve(m);
@@ -52,7 +53,7 @@ function ask(msg, timeout = 5000) {
   });
 }
 
-// pi owns the model; we do not pick it here, we only display it.
+// pi owns the model; it is not chosen here — we only display it.
 function showModel(m) {
   modelLabel.textContent = m ? m.provider + ' / ' + m.id : '—';
 }
@@ -64,7 +65,7 @@ async function boot() {
   frame.src = imageOrigin + '/image.html';
 }
 
-// Persistent downstream channel: the server initiates page_exec on its own in
+// A permanent channel downwards: the server initiates page_exec on its own in
 // the middle of a turn.
 function listen() {
   const es = new EventSource('api/events');
@@ -90,19 +91,19 @@ function listen() {
   es.onerror = () => setState('error');
 }
 
-// SSE frames are parsed by hand (EventSource cannot POST). Three things that
-// must not be swallowed silently here:
-//  - a frame may arrive split across two socket reads — buf accumulates
+// SSE frames are parsed by hand (EventSource cannot do POST). Three things
+// here must not be let through silently:
+//  - a frame can arrive split across two socket reads — buf accumulates
 //    between iterations and is only cut at a "\n\n" that was actually found,
-//    so an incomplete tail simply waits for the next read;
-//  - "data:" may be missing or malformed in a frame (a connection dropped
-//    mid-frame, stray byte garbage) — then JSON.parse(undefined) would kill
-//    the whole turn; a frame without data is skipped rather than parsed
-//    blindly;
-//  - the stream may end without ever sending "done" or "error" (a network
-//    drop, a TCP reset). Quietly treating that as an empty answer would count
-//    the turn as a legitimate "empty response", even though the model's code
-//    could have been lost mid-transfer. Hence `finished` is mandatory.
+//    so an unfinished tail simply waits for the next read;
+//  - "data:" may be missing from a frame or malformed (a connection dropped
+//    mid-frame, stray byte garbage) — then JSON.parse(undefined) would bring
+//    down the whole turn; a frame with no data is skipped rather than parsed
+//    on a guess;
+//  - the stream can break without sending either "done" or "error" (a network
+//    drop, a TCP reset). Treating that quietly as an empty answer would count
+//    the turn as a legitimate "empty reply" even though the model's code could
+//    have been lost halfway through. Hence `finished` is mandatory.
 async function readStream(res, onDelta) {
   const reader = res.body.getReader();
   const dec = new TextDecoder();
@@ -130,14 +131,14 @@ async function readStream(res, onDelta) {
       else if (ev.event === 'error') { error = data.message; finished = true; }
     }
   }
-  if (!finished) throw new Error('the stream ended before the model answered');
+  if (!finished) throw new Error('the stream broke off before the model answered');
   if (error) throw new Error(error);
   return code;
 }
 
 async function commit() {
-  // The hotkey knows nothing about the button being disabled — without this
-  // check, Cmd/Ctrl+Enter during a turn already in flight would start a second
+  // The hotkey knows nothing about a disabled button — without this check
+  // Cmd/Ctrl+Enter during a turn already in progress would start a second
   // commit() on top of the first one.
   if (sendBtn.disabled) return;
   sendBtn.disabled = true;
@@ -150,8 +151,8 @@ async function commit() {
       body: JSON.stringify({ diff }),
     });
     // The model no longer returns code in the reply to commit — it calls
-    // page_exec itself mid-turn over the persistent channel from listen().
-    // Here we just wait for the stream to end (done/error).
+    // page_exec itself mid-turn over the permanent channel from listen(). Here
+    // we just wait for the end of the stream (done/error).
     await readStream(res, () => {});
     setState('idle');
   } catch (e) {

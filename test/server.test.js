@@ -137,6 +137,21 @@ async function readSse(res) {
   return out;
 }
 
+// The stream may open with a service snapshot of the model, so consumers of
+// page_exec must not assume their event is necessarily first in the SSE.
+async function readPageExecId(reader) {
+  const dec = new TextDecoder();
+  let buf = '';
+  for (let i = 0; i < 20; i++) {
+    const { value, done } = await reader.read();
+    if (done) break;
+    buf += dec.decode(value, { stream: true });
+    const m = /event: page_exec\ndata: \{"type":"page_exec","id":"(p\d+)"/.exec(buf);
+    if (m) return m[1];
+  }
+  throw new Error('no page_exec found in the stream: ' + buf);
+}
+
 function post(base, body) {
   return fetch(base + '/api/commit', {
     method: 'POST', headers: { 'content-type': 'application/json' },
@@ -275,6 +290,65 @@ test("a page_exec result with someone else's id is dropped, the server stays ali
   } finally { await app.close(); }
 });
 
+test('the model chosen by pi reaches an already connected shell', async () => {
+  const model = { provider: 'pi', id: 'saved-default' };
+  const app = createApp({
+    sessionFactory: async () => ({
+      session: { model, prompt: async () => {}, subscribe: () => () => {},
+        abort: async () => {}, waitForIdle: async () => {}, dispose: () => {} },
+    }),
+  });
+  await app.listen(0, 0);
+  let reader = null;
+  try {
+    const events = await fetch(`http://127.0.0.1:${app.port}/api/events`);
+    reader = events.body.getReader();
+
+    await fetch(`http://127.0.0.1:${app.port}/api/commit`, {
+      method: 'POST', headers: { 'content-type': 'application/json' },
+      body: JSON.stringify({ diff: 'x' }),
+    }).then(r => r.text());
+
+    const text = new TextDecoder().decode((await reader.read()).value);
+    assert.match(text, /event: model/);
+    assert.match(text, /"provider":"pi","id":"saved-default"/);
+  } finally {
+    try { await reader?.cancel(); } catch {}
+    await app.close();
+  }
+});
+
+
+test('a new SSE subscription receives the model pi has already chosen', async () => {
+  const model = { provider: 'pi', id: 'saved-default' };
+  const app = createApp({
+    sessionFactory: async () => ({
+      session: { model, prompt: async () => {}, subscribe: () => () => {},
+        abort: async () => {}, waitForIdle: async () => {}, dispose: () => {} },
+    }),
+  });
+  await app.listen(0, 0);
+  let reader = null;
+  try {
+    // Simulate a warmup that already finished: the model is chosen before SSE
+    // connects.
+    await fetch(`http://127.0.0.1:${app.port}/api/commit`, {
+      method: 'POST', headers: { 'content-type': 'application/json' },
+      body: JSON.stringify({ diff: 'x' }),
+    }).then(r => r.text());
+
+    const events = await fetch(`http://127.0.0.1:${app.port}/api/events`);
+    reader = events.body.getReader();
+    const text = new TextDecoder().decode((await reader.read()).value);
+    assert.match(text, /event: model/);
+    assert.match(text, /"provider":"pi","id":"saved-default"/);
+  } finally {
+    try { await reader?.cancel(); } catch {}
+    await app.close();
+  }
+});
+
+
 test('a page_exec from the model reaches the SSE subscriber and comes back as a result', async () => {
   let callPage = null;
   const app = createApp({
@@ -397,7 +471,7 @@ test('the shell disconnected mid-turn: a page_exec call is rejected, the server 
   });
 });
 
-test('two SSE subscribers: the request goes to both, a duplicate reply with the same id does not confuse the bridge', async () => {
+test('two SSE subscribers: the request goes to both, a duplicate answer with the same id does not confuse the bridge', async () => {
   let callPage = null;
   await withServer({
     sessionFactory: async ({ callPage: fn }) => {
@@ -410,21 +484,20 @@ test('two SSE subscribers: the request goes to both, a duplicate reply with the 
     const es2 = await fetch(base + '/api/events');
     const r1 = es1.body.getReader();
     const r2 = es2.body.getReader();
-    const dec = new TextDecoder();
-
-    await post(base, { diff: 'd' }).then(r => r.text());
+    await post(base, { diff: 'x' }).then(r => r.text());
 
     const pending = callPage('return 1 + 1');
-    const id1 = /"id":"(p\d+)"/.exec(dec.decode((await r1.read()).value))?.[1];
-    const id2 = /"id":"(p\d+)"/.exec(dec.decode((await r2.read()).value))?.[1];
-    assert.ok(id1, 'the first subscriber must receive the page_exec request');
+    const id1 = await readPageExecId(r1);
+    const id2 = await readPageExecId(r2);
+    assert.ok(id1, 'the first subscriber should receive the page_exec request');
     assert.equal(id1, id2, 'both subscribers get the same request with the same id');
 
     await fetch(base + '/api/page-result', {
       method: 'POST', headers: { 'content-type': 'application/json' },
       body: JSON.stringify({ id: id1, ok: true, value: '2' }),
     });
-    // a late reply from the second subscriber with the same id — the server must not trip over it
+    // a late answer from the second subscriber with the same id — the server
+    // must not trip over it
     const dup = await fetch(base + '/api/page-result', {
       method: 'POST', headers: { 'content-type': 'application/json' },
       body: JSON.stringify({ id: id1, ok: true, value: 'a different answer' }),
@@ -445,7 +518,7 @@ test('the shell reconnecting restores the page_exec channel', async () => {
         abort: async () => {}, waitForIdle: async () => {}, dispose: () => {} } };
     },
   }, async base => {
-    await post(base, { diff: 'd' }).then(r => r.text()); // brings the session up
+    await post(base, { diff: 'x' }).then(r => r.text()); // brings the session up
 
     const ctrl = new AbortController();
     await fetch(base + '/api/events', { signal: ctrl.signal });
@@ -453,17 +526,16 @@ test('the shell reconnecting restores the page_exec channel', async () => {
     await new Promise(r => setTimeout(r, 100));
     await assert.rejects(callPage('a'), /disconnected|not connected/);
 
-    // reconnect — a new SSE request must start accepting requests again
+    // reconnect — a new SSE request must accept requests again
     const es2 = await fetch(base + '/api/events');
     const reader = es2.body.getReader();
-    const dec = new TextDecoder();
     const pending = callPage('return 3');
-    const m = /"id":"(p\d+)"/.exec(dec.decode((await reader.read()).value));
-    assert.ok(m, 'after a reconnect the server must send requests into the SSE again');
+    const id = await readPageExecId(reader);
+    assert.ok(id, 'after reconnecting the server must send requests into the SSE again');
 
     await fetch(base + '/api/page-result', {
       method: 'POST', headers: { 'content-type': 'application/json' },
-      body: JSON.stringify({ id: m[1], ok: true, value: '3' }),
+      body: JSON.stringify({ id, ok: true, value: '3' }),
     });
     assert.deepEqual(await pending, { ok: true, value: '3' });
     reader.cancel();

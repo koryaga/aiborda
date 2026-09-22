@@ -1,7 +1,7 @@
 // The bridge from the server to the image. The server cannot reach the image
-// directly: a request goes to the shell over SSE, the shell hands it to the
-// image via postMessage, and the result comes back as a POST. Only the matching
-// of requests to responses lives here.
+// directly: the request goes out to the shell over SSE, the shell passes it on
+// to the image via postMessage, and the result comes back as a POST. All that
+// lives here is the matching of requests to responses.
 
 export function createBridge({ send, timeoutMs = 15000 } = {}) {
   const pending = new Map();
@@ -9,12 +9,12 @@ export function createBridge({ send, timeoutMs = 15000 } = {}) {
   let sender = send;
 
   function call(code) {
-    if (!sender) return Promise.reject(new Error('the shell is not connected'));
+    if (!sender) return Promise.reject(new Error('shell is not connected'));
     const id = 'p' + (++seq);
     return new Promise((resolve, reject) => {
       const timer = setTimeout(() => {
         pending.delete(id);
-        reject(new Error(`the image did not answer within ${timeoutMs} ms`));
+        reject(new Error(`image did not answer within ${timeoutMs} ms`));
       }, timeoutMs);
       pending.set(id, { resolve, reject, timer });
       sender({ type: 'page_exec', id, code });

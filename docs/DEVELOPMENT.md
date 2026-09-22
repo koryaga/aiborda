@@ -22,7 +22,9 @@ Two invariants:
    with a `page_exec` call.
 
 The design documents (specs, plans, brainstorms) are deliberately kept out of
-the repository and live only on the author's machine.
+the repository and live only on the author's machine. The one exception is
+[alternative-pi-plugin.md](alternative-pi-plugin.md): the deferred option of
+running aiborda as a pi extension, with the facts verified at the time.
 
 ## Running it
 
@@ -238,7 +240,7 @@ node log.mjs -f
 npm test
 ```
 
-161 tests on `node:test`. The image tests execute **the very text** of
+163 tests on `node:test`. The image tests execute **the very text** of
 `image-boot.js` that is loaded in the browser — through `new Function` in
 jsdom. No test goes out to the network or reaches a model: the session is
 substituted via `sessionFactory`, and the image's responses come through the

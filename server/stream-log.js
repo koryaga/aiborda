@@ -1,8 +1,8 @@
 // Turns pi session events into a stream for stdout.
 //
-// Why a separate file: printing itself is a single write call, but the decision
-// about what exactly to print depends on the shape of the event and is worth
-// having as a pure function under tests.
+// Why a separate file: the printing itself is a single write call, but the
+// decision about what exactly to print depends on the shape of the event and
+// is worth having as a pure function under test.
 //
 // The event shapes are taken from pi's types:
 //   message_update       { assistantMessageEvent }  — token-level stream
@@ -54,10 +54,10 @@ export function formatEvent(ev, { color = true } = {}) {
   return null;
 }
 
-// Which stream is running right now: thinking or answer. Needed to separate
-// them with a newline — otherwise they run together into one blob, and without
-// color (in a log file, say) there is no telling where one ended and the other
-// began.
+// Which stream is running right now: reasoning or the answer. Needed to
+// separate them with a newline — otherwise they run together into one blob,
+// and without color (in a log file, say) there is no telling where one ended
+// and the other began.
 export function streamKind(ev) {
   if (ev?.type !== 'message_update') return null;
   const t = ev.assistantMessageEvent?.type;

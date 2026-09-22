@@ -1,13 +1,13 @@
 // A reader for the current pi session transcript. Run: node log.mjs [-f]
 // pi writes a turn to disk message by message, so this is not a token-level
-// stream but the full picture: thinking, tool calls with arguments, results.
+// stream but the full picture: reasoning, tool calls with arguments, results.
 import { existsSync, readFileSync, readdirSync, statSync, watch } from 'node:fs';
 import { homedir } from 'node:os';
 import { join } from 'node:path';
 
 // pi encodes a directory by replacing slashes with dashes: /a/b -> --a-b--
-// Underscores are preserved. Should that rule ever change, fall back to
-// looking for the directory whose transcript records our cwd.
+// Underscores are preserved. Should that rule ever change, we look for the
+// directory whose transcript records our own cwd.
 const root = join(homedir(), '.pi', 'agent', 'sessions');
 const guess = join(root, '-' + process.cwd().replaceAll('/', '-') + '--');
 const dir = existsSync(guess) ? guess : (readdirSync(root)

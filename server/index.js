@@ -103,6 +103,11 @@ export function createApp(opts = {}) {
     const factory = opts.sessionFactory ?? startSession;
     const { session } = await factory({ callPage: code => bridge.call(code) });
     state.session = session;
+    // The model has already been chosen inside createAgentSession(). That does
+    // not come with a model_select event, so we publish the initial value
+    // ourselves: otherwise a shell that managed to read /api/config before
+    // warmup() would show "—" forever.
+    broadcast('model', modelRef());
     session.subscribe(ev => {
       if (!ev?.type) return;
       broadcast('agent', { type: ev.type });
@@ -189,6 +194,10 @@ export function createApp(opts = {}) {
         // would hang waiting for the response status itself, not just the data.
         res.flushHeaders();
         listeners.add(res);
+        // SSE connects after the first /api/config. If warmup finished between
+        // those two requests, the initial broadcast above went out with no
+        // listeners; this snapshot closes that race window.
+        if (state.session) sse(res, 'model', modelRef());
         // Every new connection re-installs the bridge's sender — that is how
         // the channel is restored after the shell reconnects: while at least
         // one listener is alive the bridge can send requests; when the last one
