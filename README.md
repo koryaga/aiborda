@@ -47,21 +47,35 @@ The input field is at the bottom of the page. Write what you need and press
 is not a new message in a feed but a change to the same page: pi edits the DOM
 directly.
 
+The answer comes in the form that fits it, not as a paragraph of text: a single
+number is set large, items become a table, amounts to compare become a chart, a
+plan becomes a checklist you can tick.
+
 Examples of what you can ask for:
 
 - "make a shopping list with three items"
-- "draw a 3×4 table"
+- "compare the population of Paris, Berlin and Madrid" — a chart, with its
+  numbers in an editable table
 - "find out how many files are in the current folder" — the AI will run a
   command in the terminal
 - "remember that my name is Sergey" — this is saved and survives a page reload
 - "go to site X and show me the top news"
 
-Any text that appears on the page can usually be edited right in the browser —
-click and type. That is another way to answer the AI without typing anything
-into the field at the bottom.
+### Three ways to answer the AI
 
-While an answer is in progress, the dot next to the button spins. The full text
-of the AI's reasoning is visible in the terminal where `npm start` is running.
+- **Type into the field at the bottom.**
+- **Edit the page itself.** Text the AI puts on the page is editable — all of
+  it except buttons, links and status messages: click and type — fix a number
+  in a table, rewrite a line, untick a step. Then press send, and the AI gets
+  exactly what you changed and where.
+- **Point, then ask.** Click something on the page, or select a few words in
+  it, then type your question into the field: "why is this so big?". The AI
+  knows what "this" is.
+
+While an answer is in progress, the dot next to the button spins; it turns red
+if something went wrong. The details are in the **log** under the button — it
+stays collapsed until you open it. The full text of the AI's reasoning is
+visible in the terminal where `npm start` is running.
 
 ## Worth knowing
 

@@ -160,3 +160,110 @@ test("a synthetic Ctrl+Enter from the model's code is ignored", () => {
   key(dom, doc, { ctrlKey: true });
   assert.equal(commits().length, 0, 'the model must not commit a turn on the human behalf');
 });
+
+// --- What the model adds is editable by default ---
+
+const tick = () => new Promise(r => setTimeout(r, 0));
+
+function withPage(html = '<input id="q"><div id="out"></div><div id="notes" hidden></div>') {
+  const it = makeImage(html);
+  it.img.install();
+  return it;
+}
+
+test('a block of text the model adds becomes editable; its children inherit rather than repeat it', async () => {
+  const { img, doc } = withPage();
+  await img.exec('document.getElementById("out").innerHTML = "<section id=s><h2>Title</h2><p>Body</p></section>"');
+  assert.equal(doc.querySelector('#s').getAttribute('contenteditable'), 'true');
+  assert.equal(doc.querySelector('h2').getAttribute('contenteditable'), null);
+  assert.equal(doc.querySelector('#out').getAttribute('contenteditable'), null,
+    'the scaffold container is not touched when the model added elements into it');
+});
+
+test('bare text the model puts into an element makes that element editable', async () => {
+  const { img, doc } = withPage();
+  await img.exec('document.getElementById("out").textContent = "391"');
+  assert.equal(doc.querySelector('#out').getAttribute('contenteditable'), 'true');
+});
+
+test("the model's own choice stands: contenteditable=false and =true are left as they are", async () => {
+  const { img, doc } = withPage();
+  await img.exec(
+    'document.getElementById("out").innerHTML =' +
+    ' "<p id=ro contenteditable=false>status</p><p id=rw contenteditable=true>text</p>"'
+  );
+  assert.equal(doc.querySelector('#ro').getAttribute('contenteditable'), 'false');
+  assert.equal(doc.querySelector('#rw').getAttribute('contenteditable'), 'true');
+});
+
+test('controls inside an editable block stay clickable', async () => {
+  const { img, doc } = withPage();
+  await img.exec(
+    'document.getElementById("out").innerHTML =' +
+    ' "<div id=card><p>Plan</p><button id=b>go</button><a id=l href=#>more</a><button id=keep contenteditable=true>x</button></div>"'
+  );
+  assert.equal(doc.querySelector('#card').getAttribute('contenteditable'), 'true');
+  assert.equal(doc.querySelector('#b').getAttribute('contenteditable'), 'false');
+  assert.equal(doc.querySelector('#l').getAttribute('contenteditable'), 'false');
+  assert.equal(doc.querySelector('#keep').getAttribute('contenteditable'), 'true', "the model's own attribute stands");
+});
+
+test('code, styles, graphics and empty containers are not made editable', async () => {
+  const { img, doc } = withPage();
+  await img.exec(
+    'const out = document.getElementById("out");' +
+    'out.insertAdjacentHTML("beforeend", "<style id=st>#x{color:red}</style><canvas id=cv></canvas><div id=empty></div>");' +
+    'out.insertAdjacentHTML("beforeend", "<svg id=sv><text>label</text></svg>");' +
+    'const b = document.createElement("button"); b.id = "lone"; b.textContent = "ok"; out.append(b);'
+  );
+  for (const id of ['st', 'cv', 'empty', 'sv', 'lone']) {
+    assert.equal(doc.getElementById(id).getAttribute('contenteditable'), null, id);
+  }
+  assert.equal(doc.querySelector('text').getAttribute('contenteditable'), null);
+});
+
+test('#q and the hidden #notes are left alone', async () => {
+  const { img, doc } = withPage();
+  await img.exec('document.getElementById("notes").innerHTML = "<p id=n>remember this</p>"');
+  assert.equal(doc.querySelector('#n').getAttribute('contenteditable'), null);
+  assert.equal(doc.querySelector('#notes').getAttribute('contenteditable'), null);
+});
+
+test("making the model's output editable does not reach the human's diff", async () => {
+  const { img, doc } = withPage();
+  await img.exec('document.getElementById("out").innerHTML = "<p id=p>hello</p>"');
+  await tick();
+  assert.equal(doc.querySelector('#p').getAttribute('contenteditable'), 'true');
+  assert.equal(img.buildDiff(), '');
+});
+
+test('what the human adds is not touched — only the model output is made editable', async () => {
+  const { img, doc } = withPage();
+  const p = doc.createElement('p');
+  p.textContent = 'mine';
+  doc.getElementById('out').append(p);
+  await tick();
+  await img.exec('return 1');
+  assert.equal(p.getAttribute('contenteditable'), null);
+});
+
+test('what the model added before an error is still made editable', async () => {
+  const { img, doc } = withPage();
+  const r = await img.exec('document.getElementById("out").innerHTML = "<p id=p>partial</p>"; noSuchThing();');
+  assert.equal(r.ok, false);
+  assert.equal(doc.querySelector('#p').getAttribute('contenteditable'), 'true');
+});
+
+test("when the model's code awaits after adding, the image's own writes still stay out of the diff", async () => {
+  // The card is added synchronously, so it is the model's; after the await the
+  // nested button is no longer in the attribution set, and without dropping the
+  // image's own writes its contenteditable="false" would read as a human edit.
+  const { img, doc } = withPage();
+  await img.exec(
+    'document.getElementById("out").innerHTML = "<div id=card><p>Plan</p><button id=b>go</button></div>";' +
+    'await new Promise(r => setTimeout(r, 5));'
+  );
+  await tick();
+  assert.equal(doc.querySelector('#b').getAttribute('contenteditable'), 'false');
+  assert.equal(img.buildDiff(), '');
+});

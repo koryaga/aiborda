@@ -26,7 +26,7 @@ test('an attribute edit lands in the diff', async () => {
   const { doc, img } = makeImage('<div id="out" class="v1"></div>');
   doc.querySelector('#out').setAttribute('class', 'v2');
   await tick();
-  assert.equal(img.buildDiff(), '#out  @class: "v1" -> "v2"');
+  assert.equal(img.buildDiff(), 'html > body > div#out  @class: "v1" -> "v2"');
 });
 
 test('two edits of one attribute yield a single line with the old value from the first', async () => {
@@ -36,7 +36,7 @@ test('two edits of one attribute yield a single line with the old value from the
   await tick();
   el.setAttribute('class', 'v3');
   await tick();
-  assert.equal(img.buildDiff(), '#out  @class: "v1" -> "v3"');
+  assert.equal(img.buildDiff(), 'html > body > div#out  @class: "v1" -> "v3"');
 });
 
 test('an edit that restored the previous value does not reach the diff', async () => {
@@ -53,7 +53,7 @@ test('a node removal lands in the diff together with its HTML and parent', async
   const { doc, img } = makeImage('<ul id="items"><li id="row-2">second</li></ul>');
   doc.querySelector('#row-2').remove();
   await tick();
-  assert.equal(img.buildDiff(), 'removed from #items: <li id="row-2">second</li>');
+  assert.equal(img.buildDiff(), 'removed from html > body > ul#items: <li id="row-2">second</li>');
 });
 
 test('a node addition lands in the diff', async () => {
@@ -63,7 +63,7 @@ test('a node addition lands in the diff', async () => {
   li.textContent = 'third';
   doc.querySelector('#items').append(li);
   await tick();
-  assert.equal(img.buildDiff(), 'added to #items: <li id="row-3">third</li>');
+  assert.equal(img.buildDiff(), 'added to html > body > ul#items: <li id="row-3">third</li>');
 });
 
 test('a node added and immediately removed does not show up in the diff', async () => {
@@ -80,7 +80,7 @@ test('a text edit lands in the diff with an nth-child path', async () => {
   const { doc, img } = makeImage('<ul id="items"><li>first</li></ul>');
   doc.querySelector('#items li').firstChild.data = 'first item';
   await tick();
-  assert.equal(img.buildDiff(), '#items > li:nth-child(1)  text: "first" -> "first item"');
+  assert.equal(img.buildDiff(), 'html > body > ul#items > li:nth-child(1)  text: "first" -> "first item"');
 });
 
 test("mutations from the model's code do not reach the diff", async () => {
@@ -97,7 +97,7 @@ test('live typing into a field lands in the diff', async () => {
   q.value = 'work out the margin';
   q.dispatchEvent(new dom.window.Event('input', { bubbles: true }));
   await tick();
-  assert.equal(img.buildDiff(), '#q  "" -> "work out the margin"');
+  assert.equal(img.buildDiff(), 'html > body > textarea#q  "" -> "work out the margin"');
 });
 
 test('after a build the buffers are empty and a repeat diff is empty', async () => {
@@ -129,7 +129,7 @@ test('moving a node yields an addition but no removal', async () => {
   await tick();
   const diff = img.buildDiff();
   assert.ok(!diff.includes('removed'), 'there must be no removal line: ' + diff);
-  assert.equal(diff, 'added to #b: <li id="row">a row</li>');
+  assert.equal(diff, 'added to html > body > ul#b: <li id="row">a row</li>');
 });
 
 test("a human edit interleaved with the model's: only human nodes in the diff", async () => {
@@ -142,9 +142,9 @@ test("a human edit interleaved with the model's: only human nodes in the diff", 
   await tick();
   const lines = img.buildDiff().split('\n');
   assert.equal(lines.length, 2);
-  assert.ok(lines.some(l => l.startsWith('#a')));
-  assert.ok(lines.some(l => l.startsWith('#c')));
-  assert.ok(!lines.some(l => l.startsWith('#b')));
+  assert.ok(lines.some(l => l.startsWith('html > body > div#a  ')));
+  assert.ok(lines.some(l => l.startsWith('html > body > div#c  ')));
+  assert.ok(!lines.some(l => l.startsWith('html > body > div#b  ')));
 });
 
 test('adding and removing an attribute yield readable unquoted nulls', async () => {
@@ -155,8 +155,8 @@ test('adding and removing an attribute yield readable unquoted nulls', async () 
   await tick();
   const lines = img.buildDiff().split('\n').sort();
   assert.deepEqual(lines, [
-    '#out  @class: "v1" -> null',
-    '#out  @data-new: null -> "a value"',
+    'html > body > div#out  @class: "v1" -> null',
+    'html > body > div#out  @data-new: null -> "a value"',
   ]);
 });
 
@@ -207,9 +207,9 @@ test('line order is stable: field, attribute, removal — in a fixed order', asy
   await tick();
   assert.equal(
     img.buildDiff(),
-    '#q  "" -> "input"\n' +
-    '#out  @class: "v1" -> "v2"\n' +
-    'removed from #items: <li id="row">a row</li>'
+    'html > body > textarea#q  "" -> "input"\n' +
+    'html > body > div#out  @class: "v1" -> "v2"\n' +
+    'removed from html > body > ul#items: <li id="row">a row</li>'
   );
 });
 
@@ -220,7 +220,7 @@ test('handle answers diff with a diff message carrying the text and the same id'
   doc.querySelector('#out').setAttribute('class', 'v2');
   await tick();
   await img.handle({ type: 'diff', id: 3 });
-  assert.deepEqual(sent.at(-1), { type: 'diff', id: 3, text: '#out  @class: "v1" -> "v2"' });
+  assert.deepEqual(sent.at(-1), { type: 'diff', id: 3, text: 'html > body > div#out  @class: "v1" -> "v2"' });
 });
 
 // --- Second review round: C1–C4, I5–I7, M8–M11 ---
@@ -257,7 +257,7 @@ test("C2: the human edits an attribute, then the model does — the diff shows t
   await tick();
   await img.exec('document.querySelector("#out").setAttribute("class", "model")');
   await tick();
-  assert.equal(img.buildDiff(), '#out  @class: "v1" -> "human"');
+  assert.equal(img.buildDiff(), 'html > body > div#out  @class: "v1" -> "human"');
 });
 
 test('C2: the same for a text node', async () => {
@@ -266,7 +266,7 @@ test('C2: the same for a text node', async () => {
   await tick();
   await img.exec('document.querySelector("#p").firstChild.data = "model"');
   await tick();
-  assert.equal(img.buildDiff(), '#p  text: "original" -> "human"');
+  assert.equal(img.buildDiff(), 'html > body > p#p  text: "original" -> "human"');
 });
 
 test('C2: the reverse order (model first, then human) keeps working correctly', async () => {
@@ -275,7 +275,7 @@ test('C2: the reverse order (model first, then human) keeps working correctly', 
   await tick();
   doc.querySelector('#out').setAttribute('class', 'human');
   await tick();
-  assert.equal(img.buildDiff(), '#out  @class: "model" -> "human"');
+  assert.equal(img.buildDiff(), 'html > body > div#out  @class: "model" -> "human"');
 });
 
 test('C3: a checkbox — ticked and unticked', async () => {
@@ -285,12 +285,12 @@ test('C3: a checkbox — ticked and unticked', async () => {
   c.checked = true;
   c.dispatchEvent(new dom.window.Event('input', { bubbles: true }));
   await tick();
-  assert.equal(img.buildDiff(), '#c  "false" -> "true"');
+  assert.equal(img.buildDiff(), 'html > body > input#c  "false" -> "true"');
 
   c.checked = false;
   c.dispatchEvent(new dom.window.Event('input', { bubbles: true }));
   await tick();
-  assert.equal(img.buildDiff(), '#c  "true" -> "false"');
+  assert.equal(img.buildDiff(), 'html > body > input#c  "true" -> "false"');
 });
 
 test('C3: a multiple select — two options picked', async () => {
@@ -303,7 +303,7 @@ test('C3: a multiple select — two options picked', async () => {
   s.options[2].selected = true;
   s.dispatchEvent(new dom.window.Event('input', { bubbles: true }));
   await tick();
-  assert.equal(img.buildDiff(), '#s  [] -> ["a","c"]');
+  assert.equal(img.buildDiff(), 'html > body > select#s  [] -> ["a","c"]');
 });
 
 test('C4: three turns in a row on one field without a repeat focus — correct "was"/"now" every time', async () => {
@@ -314,17 +314,17 @@ test('C4: three turns in a row on one field without a repeat focus — correct "
   q.value = 'hello';
   q.dispatchEvent(new dom.window.Event('input', { bubbles: true }));
   await tick();
-  assert.equal(img.buildDiff(), '#q  "" -> "hello"');
+  assert.equal(img.buildDiff(), 'html > body > textarea#q  "" -> "hello"');
 
   q.value = 'hello world';
   q.dispatchEvent(new dom.window.Event('input', { bubbles: true }));
   await tick();
-  assert.equal(img.buildDiff(), '#q  "hello" -> "hello world"');
+  assert.equal(img.buildDiff(), 'html > body > textarea#q  "hello" -> "hello world"');
 
   q.value = '';
   q.dispatchEvent(new dom.window.Event('input', { bubbles: true }));
   await tick();
-  assert.equal(img.buildDiff(), '#q  "hello world" -> ""');
+  assert.equal(img.buildDiff(), 'html > body > textarea#q  "hello world" -> ""');
 });
 
 test('I5: a node moved twice yields one line with the final parent', async () => {
@@ -333,7 +333,7 @@ test('I5: a node moved twice yields one line with the final parent', async () =>
   doc.querySelector('#b').append(row);
   doc.querySelector('#a').append(row);
   await tick();
-  assert.equal(img.buildDiff(), 'added to #a: <li id="row">a row</li>');
+  assert.equal(img.buildDiff(), 'added to html > body > ul#a: <li id="row">a row</li>');
 });
 
 test('I6: contenteditable yields only the text line, with no field line', async () => {
@@ -343,14 +343,14 @@ test('I6: contenteditable yields only the text line, with no field line', async 
   editor.firstChild.data = 'changed';
   editor.dispatchEvent(new dom.window.Event('input', { bubbles: true }));
   await tick();
-  assert.equal(img.buildDiff(), '#editor  text: "original" -> "changed"');
+  assert.equal(img.buildDiff(), 'html > body > div#editor  text: "original" -> "changed"');
 });
 
 test('I7: removing a multi-line element yields exactly one line', async () => {
   const { doc, img } = makeImage('<ul id="items"><li id="row">\n  a row with   indentation\n</li></ul>');
   doc.querySelector('#row').remove();
   await tick();
-  assert.equal(img.buildDiff(), 'removed from #items: <li id="row"> a row with   indentation </li>');
+  assert.equal(img.buildDiff(), 'removed from html > body > ul#items: <li id="row"> a row with   indentation </li>');
 });
 
 test('M8: a field removed from the DOM — the path is flagged, the value is not lost', async () => {
@@ -364,7 +364,7 @@ test('M8: a field removed from the DOM — the path is flagged, the value is not
   assert.equal(
     img.buildDiff(),
     'textarea (detached)  "" -> "typed in"\n' +
-    'removed from #wrap: <textarea id="q"></textarea>'
+    'removed from html > body > div#wrap: <textarea id="q"></textarea>'
   );
 });
 
@@ -390,7 +390,7 @@ test('M10: a freshly added node with an attribute and text yields a single line'
   li.setAttribute('class', 'x');
   li.textContent = 'new';
   await tick();
-  assert.equal(img.buildDiff(), 'added to #items: <li class="x">new</li>');
+  assert.equal(img.buildDiff(), 'added to html > body > ul#items: <li class="x">new</li>');
 });
 
 test('an added whitespace-only text node does not reach the diff', async () => {
@@ -441,7 +441,7 @@ test('a whitespace node inside an added subtree yields no extra lines', async ()
   await tick();
   const d = img.buildDiff();
   assert.equal(d.split('\n').length, 1, 'one addition, not three: ' + d);
-  assert.ok(d.startsWith('added to #items'));
+  assert.ok(d.startsWith('added to html > body > ul#items:'));
 });
 
 test('clearInput empties the field after the diff is built', async () => {
@@ -481,7 +481,7 @@ test('after clearing the baseline is empty: the next input is compared against e
   q.value = 'second';
   q.dispatchEvent(new dom.window.Event('input', { bubbles: true }));
   await tick();
-  assert.equal(img.buildDiff(), '#q  "" -> "second"',
+  assert.equal(img.buildDiff(), 'html > body > input#q  "" -> "second"',
     'the "was" must be empty, not "first"');
 });
 
@@ -512,4 +512,147 @@ test('the diff is built before the clearing, and the sent text is in it', async 
   await img.handle({ type: 'diff', id: 7, clearInput: true });
   const msg = sent.find(m => m.type === 'diff' && m.id === 7);
   assert.ok(msg.text.includes('an important request'), 'the diff must not lose the text: ' + msg.text);
+});
+
+// --- Full paths, and "about:" — what the human is pointing at ---
+
+const PAGE =
+  '<div id="out"><figure id="calc"><div class="big value">391</div><figcaption>17 × 23</figcaption></figure>' +
+  '<section><p>one</p><p class="note x:y">two</p></section></div><input id="q" type="text">';
+
+function ask(dom, doc, text) {
+  const q = doc.querySelector('#q');
+  focusIn(dom, q);
+  q.value = text;
+  q.dispatchEvent(new dom.window.Event('input', { bubbles: true }));
+}
+
+function point(dom, el) {
+  el.dispatchEvent(new dom.window.Event('pointerdown', { bubbles: true }));
+}
+
+function select(dom, doc, textNode, from, to) {
+  const r = doc.createRange();
+  r.setStart(textNode, from);
+  r.setEnd(textNode, to);
+  const sel = doc.getSelection();
+  sel.removeAllRanges();
+  sel.addRange(r);
+  doc.dispatchEvent(new dom.window.Event('selectionchange'));
+}
+
+test('a path runs from <html> and is a selector matching exactly its own node', () => {
+  const { doc, img } = makeImage(PAGE);
+  assert.equal(img.path(doc.querySelector('.big')),
+    'html > body > div#out > figure#calc > div.big.value:nth-child(1)');
+  // a class that is not a plain identifier is left out; the selector stays valid
+  assert.equal(img.path(doc.querySelector('.note')),
+    'html > body > div#out > section:nth-child(2) > p.note:nth-child(2)');
+  for (const el of doc.querySelectorAll('body *')) {
+    const matches = doc.querySelectorAll(img.path(el));
+    assert.equal(matches.length, 1, img.path(el));
+    assert.equal(matches[0], el);
+  }
+});
+
+test('M9: with a duplicated id, each path still matches one node only', () => {
+  const { doc, img } = makeImage('<ul id="list"><li id="dup">a</li><li id="dup">b</li></ul>');
+  for (const li of doc.querySelectorAll('li')) {
+    const matches = doc.querySelectorAll(img.path(li));
+    assert.equal(matches.length, 1, img.path(li));
+    assert.equal(matches[0], li);
+  }
+});
+
+test('a question typed after clicking an element carries an about: line with its full path', async () => {
+  const { doc, img, dom } = makeImage(PAGE);
+  point(dom, doc.querySelector('.big'));
+  ask(dom, doc, 'why so big?');
+  await tick();
+  assert.equal(img.buildDiff(),
+    'html > body > input#q  "" -> "why so big?"\n' +
+    'about: html > body > div#out > figure#calc > div.big.value:nth-child(1)  "391"');
+});
+
+test('a selection points at the element around it and quotes the selected words', async () => {
+  const { doc, img, dom } = makeImage(PAGE);
+  select(dom, doc, doc.querySelector('figcaption').firstChild, 5, 7);
+  ask(dom, doc, 'where does this come from?');
+  await tick();
+  assert.equal(img.buildDiff().split('\n')[1],
+    'about: html > body > div#out > figure#calc > figcaption:nth-child(2)  selected: "23"');
+});
+
+test('the pointer is forgotten after each send: a follow-up question has no about: line', async () => {
+  const { doc, img, dom } = makeImage(PAGE);
+  point(dom, doc.querySelector('.big'));
+  ask(dom, doc, 'why?');
+  await tick();
+  assert.match(img.buildDiff(), /about:/);
+  ask(dom, doc, 'and then?');
+  await tick();
+  const d = img.buildDiff();
+  assert.ok(d.includes('"and then?"'), d);
+  assert.ok(!d.includes('about:'), d);
+});
+
+test('without a question in #q there is no about: line — an in-place edit carries its own path', async () => {
+  const { doc, img, dom } = makeImage(PAGE);
+  const big = doc.querySelector('.big');
+  point(dom, big);
+  big.firstChild.data = '392';
+  await tick();
+  assert.equal(img.buildDiff(),
+    'html > body > div#out > figure#calc > div.big.value:nth-child(1)  text: "391" -> "392"');
+});
+
+test('clicking into #q or on the bare page does not move the pointer', async () => {
+  const { doc, img, dom } = makeImage(PAGE);
+  point(dom, doc.querySelector('.big'));
+  point(dom, doc.querySelector('#q'));
+  point(dom, doc.body);
+  ask(dom, doc, 'why?');
+  await tick();
+  assert.match(img.buildDiff(), /about: .*div\.big\.value/);
+});
+
+test('a selection made while #q has focus is not pointing', async () => {
+  const { doc, img, dom } = makeImage(PAGE);
+  doc.querySelector('#q').focus();
+  select(dom, doc, doc.querySelector('figcaption').firstChild, 0, 2);
+  ask(dom, doc, 'what?');
+  await tick();
+  assert.ok(!img.buildDiff().includes('about:'));
+});
+
+test("a selection made by the model's code is not the human pointing", async () => {
+  const { doc, img, dom } = makeImage(PAGE, 50);
+  await img.exec(
+    'const t = document.querySelector("figcaption").firstChild;' +
+    'const r = document.createRange(); r.setStart(t, 0); r.setEnd(t, 2);' +
+    'const s = document.getSelection(); s.removeAllRanges(); s.addRange(r);' +
+    'document.dispatchEvent(new Event("selectionchange"));'
+  );
+  await wait(100);
+  ask(dom, doc, 'what?');
+  await tick();
+  assert.ok(!img.buildDiff().includes('about:'));
+});
+
+test('a pointed-at node that has since been removed yields no about: line', async () => {
+  const { doc, img, dom } = makeImage(PAGE);
+  point(dom, doc.querySelector('.big'));
+  doc.querySelector('#calc').remove();
+  ask(dom, doc, 'where did it go?');
+  await tick();
+  assert.ok(!img.buildDiff().includes('about:'));
+});
+
+test('the about: line quotes a long text clipped to one short line', async () => {
+  const { doc, img, dom } = makeImage('<p id="long">' + 'word '.repeat(60) + '</p><input id="q">');
+  point(dom, doc.querySelector('#long'));
+  ask(dom, doc, 'summarise this');
+  await tick();
+  const about = img.buildDiff().split('\n')[1];
+  assert.equal(about, 'about: html > body > p#long  ' + JSON.stringify('word '.repeat(16).slice(0, 80) + '…'));
 });

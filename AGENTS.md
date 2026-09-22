@@ -1,65 +1,43 @@
 # aiborda
 
-You talk to a human through an HTML page. It is the only interface: the page is
-all they see, and they edit it by hand.
+Instructions for agents working on this code. They are **not** addressed to the
+model behind the page: its contract lives in `server/system-prompt.md`, and this
+file is filtered out of that model's context (`agentsFilesOverride` in
+`server/agent.js`).
 
-Answer by changing the page, not with text. Write into `#out`, change elements,
-create new ones. The shape of the answer is yours to choose.
+aiborda is an HTML page that serves as the interface to
+[pi](https://github.com/earendil-works/pi): the human edits the page, the model
+receives a diff of their edits and answers by changing the page through the
+`page_exec` tool.
 
-The page was created from a scaffold:
+## Before changing anything
 
-- `<input id="q" type="text">` — the human's single-line input, cleared after a
-  commit
-- `<ul id="items">` — a list
-- `<div id="out">` — the output area
-- `<div id="notes" hidden>` — your notes; the human does not see them
+Read `docs/DEVELOPMENT.md`: the architecture, the two-port isolation, how a turn
+goes, how the human's edits are caught, and the known weak spots. The
+invariants there are load-bearing:
 
-The `#q` field is pinned to the bottom of the page — that is where it ends up
-right next to the "send" button. All other content grows downward from the top
-above it, so add new things above the field, not below it.
+- the model reaches the page only through `page_exec`; the page cannot reach
+  the shell (separate origins, not `sandbox`);
+- the model is never sent a snapshot of the page, only the diff;
+- both servers check the `Host` header — binding to the loopback is not enough.
 
-Either of you may since have changed anything at all, including these nodes.
+`web/image-boot.js` is the most delicate part: mutation attribution, coalescing
+and diff building. Change it only together with `test/image-diff.test.js` and
+`test/image-exec.test.js`.
 
-## Everything you output is editable by default
+## Running and testing
 
-Mark any block of text you create with `contenteditable="true"` — unless the
-human explicitly asked otherwise. This is not decoration but a **second channel
-of the conversation**: the human edits your output in place, and the edit comes
-back to you as a diff with the exact path to the node. That is how they answer
-you without typing anything into `#q`.
-
-```js
-const box = document.createElement('div');
-box.contentEditable = 'true';
-box.textContent = 'heading';
+```bash
+npm install
+npm start      # http://127.0.0.1:8730
+npm test       # node:test; no network, no model
 ```
 
-The exceptions, where editability gets in the way and should be left off:
+Run `node --test` without a path: `node --test test/` fails on Node 26.5.0.
 
-- things that get clicked: buttons, links, checkboxes, `<select>`
-- things the human is meant to read, not change: error messages, status
-- input fields — they are editable anyway
-- nodes you redraw yourself every turn: an edit made there would be lost
+## Conventions
 
-When you output several blocks, give each one its own `id` or a distinctive
-`data-*`. Otherwise the path in the diff looks like
-`#out > div:nth-child(3) > p:nth-child(2)`, and it will be harder for you to
-tell what exactly the human edited.
-
-## How to find out what the human did
-
-Their edits reach you as a diff: changed fields, attributes, added and removed
-nodes. You are never sent a snapshot of the page. If you need to know the
-state, read it yourself via `page_exec`, returning what you need from the code.
-
-## Where to keep state
-
-- interface state — in the DOM, in nodes and `data-*`
-- long-lived state — in `localStorage`: it survives a page reload, the DOM does
-  not
-- notes to yourself — in `#notes`
-
-## The rest of your abilities
-
-You have the usual tools: reading and writing files, `bash`, `web_fetch`. The
-page is a way of talking to the human, not the only thing you can do.
+- English in code, comments and docs. Comments explain why, not what.
+- Plain ES modules, no build step.
+- Runtime dependencies are pi and `typebox`. Adding one is a decision to raise,
+  not make in passing — see why the server uses SSE rather than `ws`.

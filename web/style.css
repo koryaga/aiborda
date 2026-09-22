@@ -5,6 +5,9 @@ main { display: flex; flex-direction: column; height: 100vh; }
 #bar { display: flex; gap: .5rem; align-items: center; padding: .5rem; }
 #bar button { font: inherit; padding: .3rem .6rem; }
 :focus-visible { outline: 2px solid Highlight; outline-offset: 2px; }
+/* Debug output stays out of the way: collapsed until the human opens it. A
+   failed turn is still signalled by the red dot in the bar. */
+#debug summary { padding: 0 .5rem .25rem; font-size: 12px; opacity: .6; cursor: pointer; }
 #log { margin: 0; padding: .5rem; max-height: 8rem; overflow: auto;
        font: 12px/1.4 ui-monospace, monospace; white-space: pre-wrap; }
 @media (max-width: 900px) { #bar { flex-wrap: wrap; } }

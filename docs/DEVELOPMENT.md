@@ -63,20 +63,32 @@ that resolves to `127.0.0.1` lets their page read the responses as its own.
 
 ## Where the contract with the model lives
 
-- `AGENTS.md` in the root — the product framing and the rules of behavior. pi
-  reads it as a context file. In each directory it takes **the first one it
-  finds** out of `AGENTS.override.md`, `AGENTS.md`, `AGENTS.MD`, `CLAUDE.md`,
-  `CLAUDE.MD`; first the global one from `~/.pi/agent/`, then from the root
-  down through the ancestors. **`README.md` is not a context file** — the model
-  never sees it.
-- `promptGuidelines` and `promptSnippet` on the `page_exec` tool in
-  `server/agent.js` — the mechanics: what to read, where to keep state, where
-  the human's edits come from.
+In three places, from the strongest to the weakest position:
 
-We have no separate system prompt and need none: `createAgentSession` has no
-such field, and both routes above are the supported ones. pi assembles the base
-prompt itself, and our strings go into its "Available tools" and "Guidelines"
-sections.
+- **`server/system-prompt.md` — the system prompt itself.** It *replaces* pi's
+  base prompt through `systemPromptOverride` on `DefaultResourceLoader`
+  (`createAgentSession` has no such field; the loader does). pi's base prompt
+  opens with "You are an expert coding assistant" and closes its guidelines with
+  "Be concise in your responses": both frame a text reply as the answer, and
+  they used to outrank our contract, which pi appended last as a project context
+  file. With the override, pi drops `promptSnippet` and `promptGuidelines`
+  altogether, so everything the model must know lives in this one file.
+- **The turn framing, `frameTurn()` in `server/agent.js`.** The diff goes to the
+  model wrapped in a one-line header and a reminder at the end — the last thing
+  it reads before answering.
+- **The nudge, in `handleCommit` in `server/index.js`.** If a turn still ends
+  with text other than the log word `done`, that text is sent back once as a
+  hidden custom message with `triggerTurn: true`, so the model moves it onto the
+  page. Once per human turn: a second miss is left alone rather than looped on.
+  A turn that ends with no text at all is never nudged.
+
+`AGENTS.md` in the root is **not** part of the contract: it is for agents
+working on this code. pi would load it as a context file (it takes the first of
+`AGENTS.override.md`, `AGENTS.md`, `AGENTS.MD`, `CLAUDE.md`, `CLAUDE.MD` in each
+directory, from `~/.pi/agent/` and down through the ancestors of the working
+directory), so `agentsFilesOverride` filters out every context file inside this
+repository. Context files from elsewhere — the user's global one, a parent
+directory's — still reach the model. **`README.md` is not a context file.**
 
 ## Permissions
 
@@ -94,7 +106,8 @@ mitigations at the moment.
 ```
 server/
   index.js       two HTTP servers, SSE down, POST up, static files
-  agent.js       the pi session and the page_exec tool
+  agent.js       the pi session, the page_exec tool, turn framing, the nudge
+  system-prompt.md  the contract with the model
   bridge.js      matching requests to the image with their responses
 web/
   index.html     the shell
@@ -102,7 +115,7 @@ web/
   image.html     the image: the page scaffold
   image-boot.js  the mutation observer, attribution, diff building, snapshot
   style.css
-AGENTS.md        the contract with the model
+AGENTS.md        instructions for agents working on this code
 ```
 
 ### How a turn goes
@@ -112,14 +125,16 @@ the human edits the page
   ↓ "send"
 the shell asks the image for a diff  (postMessage)
   ↓ POST /api/commit
-the server calls session.prompt(diff)
+the server calls session.prompt(frameTurn(diff))
   ↓ the model decides and calls page_exec
 server → shell (SSE) → image (postMessage) → back via POST /api/page-result
+  ↓ the turn ends in text other than "done"?
+one hidden nudge, one more turn, then "done" goes to the shell
 ```
 
-The model can call `page_exec`, `bash`, `read`, `write` and `web_fetch` as many
-times as it likes within a single turn. Reading the state does not cost a turn
-of its own: `page_exec` both reads and writes.
+The model can call `page_exec`, `bash`, `read`, `edit` and `write` as many times
+as it likes within a single turn. Reading the state does not cost a turn of its
+own: `page_exec` both reads and writes.
 
 The server → image channel is built on SSE down and POST up rather than a
 WebSocket: Node has a WebSocket client but no server, and the `ws` package
@@ -127,16 +142,53 @@ would become the first dependency besides pi.
 
 ### How the human's edits are caught
 
-`web/image-boot.js` is the subtlest part of the project, carried over from the
-first milestone unchanged. Edits made through DevTools produce no events at
-all, so the foundation is a `MutationObserver`; live typing into a field
-changes the `.value` property, which the observer does not see, so for fields
-`focusin`, `input` and `change` are listened to separately.
+`web/image-boot.js` is the subtlest part of the project. Edits made through
+DevTools produce no events at all, so the foundation is a `MutationObserver`;
+live typing into a field changes the `.value` property, which the observer does
+not see, so for fields `focusin`, `input` and `change` are listened to
+separately.
 
 The model's own edits are filtered out by the `page_exec` execution window, not
 by `isTrusted`. Coalescing is mandatory: `getAttribute()` at the moment a
 record is delivered returns the current value, not the value at the time of the
 mutation.
+
+**What the model adds is editable by default.** The prompt asks for it, but a
+prompt only makes it likely, so the image enforces it: at the end of every
+`page_exec` (after an error too), each topmost block of text the model added
+gets `contenteditable="true"` unless it or an ancestor already carries a
+`contenteditable` of its own. Buttons, links and form controls inside it get
+`contenteditable="false"`, so they stay clickable. `#q`, `#notes`, scripts,
+styles, SVG, canvas and empty containers are left alone, and so is anything the
+human added. These writes belong to the image, not to either party:
+`makeEditable()` drops their records with `takeRecords()`, so they reach
+neither the diff nor the attribution. What the model adds *after* an `await`
+inside its own code is not covered: attribution already credits such nodes to
+the human (see "Known weak spots").
+
+Every node in the diff is named by its **full path from `<html>`**:
+`html > body > div#out > figure#calc > div.big:nth-child(1)`. A step is the tag
+plus a unique id, or plus its plain-identifier classes and its position among
+siblings (`head` and `body` need none). The path shows the model where a node
+sits, not just which one it is, and it is also a selector matching exactly that
+node, ready for `querySelector`. Ids and classes that are not plain identifiers
+are left out rather than escaped: `CSS.escape` is not available everywhere this
+file runs.
+
+**What the human points at.** A question typed into `#q` is usually about
+something on the page ("why is this so big?"). The image remembers the last
+element the human clicked, or the text they selected, anywhere outside `#q`.
+When a diff carries a change to `#q`, an `about:` line follows it with that
+element's full path and a short excerpt, or `selected: "…"` with the selected
+words. The pointer is reset on every send, so a follow-up question does not
+inherit a stale "this". Three things are deliberately ignored:
+
+- a click on the bare page background, which points at nothing in particular;
+- a selection made while `#q` has focus: Chrome reports text selected inside a
+  field through the document selection, anchored on the field's parent, so
+  selecting words of the question itself would point at the whole page;
+- a selection made during the `page_exec` window: the model's code can move
+  the selection, and the browser reports that as a trusted event.
 
 ## Keyboard
 
@@ -186,7 +238,7 @@ node log.mjs -f
 npm test
 ```
 
-127 tests on `node:test`. The image tests execute **the very text** of
+161 tests on `node:test`. The image tests execute **the very text** of
 `image-boot.js` that is loaded in the browser — through `new Function` in
 jsdom. No test goes out to the network or reaches a model: the session is
 substituted via `sessionFactory`, and the image's responses come through the
@@ -211,9 +263,17 @@ wrote the answer onto the page.
 - **A human edit to the same node the model is editing** during a turn will be
   attributed to the model and lost. `MutationObserver` does not report
   authorship; attribution goes by the execution window with a grace period.
+- **The reverse: what the model adds after an `await` in its own code** counts
+  as the human's — unless it lands on a node the model already touched in that
+  call. Past the first macrotask a human could have slipped in, so new nodes are
+  not credited to the model. Such nodes reach the next diff as the human's
+  additions, and they are not made editable by default. It shows up whenever
+  the model's code fetches something and only then renders it.
 - **The diff is lost on a network failure**: the image clears its buffers at
   build time, before it is known whether the request got through.
-- **The model's text is only visible in `node`'s output**, not on the page. The
+- **The model's text is only visible in `node`'s output**, not on the page. A
+  turn that ends in text is handed back once (see the nudge above); if the model
+  answers in text a second time, that text stays invisible to the human. The
   indicator only shows the fact that a turn is running.
 - **Model selection has been removed from the interface** — the name is shown
   next to the button, but it cannot be changed from the page. It will come back

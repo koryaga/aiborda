@@ -3,7 +3,7 @@ import { readFile } from 'node:fs/promises';
 import { join, normalize } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { createBridge } from './bridge.js';
-import { startSession } from './agent.js';
+import { frameTurn, nudgeMessage, startSession, strayText } from './agent.js';
 import { createPrinter } from './stream-log.js';
 
 const DEFAULT_WEB_ROOT = fileURLToPath(new URL('../web/', import.meta.url));
@@ -126,8 +126,17 @@ export function createApp(opts = {}) {
     // route specifically.
     try {
       const session = await ensureSession();
-      await session.prompt(String(body.diff ?? ''));
+      await session.prompt(frameTurn(String(body.diff ?? '')));
       await session.waitForIdle();
+      // A closing remark in text is the model's native habit, and the prompt
+      // only weakens it. If the turn still ended in text, hand it back once so
+      // the model moves it onto the page; a second miss is left alone rather
+      // than looped on. A turn with no text at all is fine as it is.
+      const stray = strayText(session.messages);
+      if (stray !== null) {
+        await session.sendCustomMessage(nudgeMessage(stray), { triggerTurn: true });
+        await session.waitForIdle();
+      }
       sse(res, 'done', {});
     } catch (e) {
       sse(res, 'error', { message: String(e.message) });

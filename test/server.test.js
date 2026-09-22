@@ -6,6 +6,7 @@ import { mkdtemp, writeFile, rm, readFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { createApp } from '../server/index.js';
+import { frameTurn } from '../server/agent.js';
 
 const PACKAGE_JSON_NEEDLE = '"name": "aiborda"';
 
@@ -181,8 +182,66 @@ test('commit starts a turn and returns a stream', async () => {
     });
     assert.equal(res.status, 200);
     await res.text();
-    assert.equal(calls[0], '#q  "" -> "hello"');
+    assert.equal(calls[0], frameTurn('#q  "" -> "hello"'));
   } finally { await app.close(); }
+});
+
+// --- The nudge: a turn that ended in text is handed back once ---
+
+// A session whose last message is set by the test; sendCustomMessage records
+// the nudge and, like a real follow-up turn, may replace the last message.
+function nudgeSession({ first, afterNudge }) {
+  const nudges = [];
+  const events = [];
+  let last = first;
+  const session = {
+    prompt: async () => { events.push('prompt'); },
+    subscribe: () => () => {},
+    abort: async () => {},
+    waitForIdle: async () => { events.push('idle'); },
+    dispose: () => {},
+    get messages() { return last ? [last] : []; },
+    sendCustomMessage: async (message, options) => {
+      nudges.push({ message, options });
+      events.push('nudge');
+      last = afterNudge;
+    },
+  };
+  return { factory: async () => ({ session }), nudges, events };
+}
+
+const say = text => ({ role: 'assistant', stopReason: 'stop', content: [{ type: 'text', text }] });
+
+test('a turn that ended in text gets one nudge, then the stream finishes', async () => {
+  const s = nudgeSession({ first: say('The answer is 42.'), afterNudge: say('done') });
+  await withServer({ sessionFactory: s.factory }, async base => {
+    const body = await (await post(base, { diff: 'd' })).text();
+    assert.match(body, /event: done/);
+  });
+  assert.equal(s.nudges.length, 1);
+  assert.equal(s.nudges[0].options.triggerTurn, true);
+  assert.ok(s.nudges[0].message.content.includes('The answer is 42.'));
+  // the nudged turn is waited for before "done" goes out
+  assert.deepEqual(s.events, ['prompt', 'idle', 'nudge', 'idle']);
+});
+
+test('a turn that ended without text, or with the log word, is not nudged', async () => {
+  for (const first of [say('done'), { role: 'assistant', stopReason: 'stop', content: [] }]) {
+    const s = nudgeSession({ first });
+    await withServer({ sessionFactory: s.factory }, async base => {
+      await (await post(base, { diff: 'd' })).text();
+    });
+    assert.equal(s.nudges.length, 0);
+  }
+});
+
+test('a second miss is left alone: one nudge per human turn, no loop', async () => {
+  const s = nudgeSession({ first: say('Here it is.'), afterNudge: say('Still text.') });
+  await withServer({ sessionFactory: s.factory }, async base => {
+    const body = await (await post(base, { diff: 'd' })).text();
+    assert.match(body, /event: done/);
+  });
+  assert.equal(s.nudges.length, 1);
 });
 
 test('abort reaches the session', async () => {
