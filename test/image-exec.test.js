@@ -33,34 +33,34 @@ test('exec returns an error rather than throwing', async () => {
   assert.ok(r.error.length > 0);
 });
 
-test('exec with no return produces no value', async () => {
+test('exec without a return yields no value', async () => {
   const { img } = makeImage();
   const r = await img.exec('const x = 1;');
   assert.equal(r.ok, true);
   assert.equal(r.value, undefined);
 });
 
-test('the value is truncated to 10000 characters', async () => {
+test('a value is truncated to 10000 characters', async () => {
   const { img } = makeImage();
-  const r = await img.exec('return "x".repeat(20000)');
+  const r = await img.exec('return "y".repeat(20000)');
   assert.equal(r.value.length, 10000);
 });
 
-test('snapshot carries the live field value into the markup', async () => {
+test("snapshot carries a field's live value into the markup", async () => {
   const { img, doc } = makeImage();
-  doc.querySelector('#q').value = 'typed';
-  assert.ok(img.snapshot().includes('typed'));
+  doc.querySelector('#q').value = 'typed in';
+  assert.ok(img.snapshot().includes('typed in'));
 });
 
 test('snapshot does not mutate the live DOM', async () => {
   const { img, doc } = makeImage();
   const q = doc.querySelector('#q');
-  q.value = 'typed';
+  q.value = 'typed in';
   img.snapshot();
   assert.equal(q.getAttribute('value'), null);
 });
 
-test('handle answers an exec with a result message carrying the same id', async () => {
+test('handle answers exec with a result message carrying the same id', async () => {
   const { img, sent } = makeImage();
   await img.handle({ type: 'exec', id: 7, code: 'return 5' });
   assert.deepEqual(sent.at(-1), { type: 'result', id: 7, ok: true, value: '5', error: undefined });
@@ -68,28 +68,28 @@ test('handle answers an exec with a result message carrying the same id', async 
 
 // --- Beyond the plan ---
 
-test('exec works with asynchronous model code (an await inside)', async () => {
+test("exec works with the model's asynchronous code (an await inside)", async () => {
   const { img } = makeImage();
   const r = await img.exec('await new Promise(r => setTimeout(r, 1)); return "done"');
   assert.equal(r.ok, true);
   assert.equal(r.value, 'done');
 });
 
-test('exec serialises an object into parseable JSON, not [object Object]', async () => {
+test('exec serializes an object into parseable JSON, not [object Object]', async () => {
   const { img } = makeImage();
   const r = await img.exec('return ({a: 1})');
   assert.equal(r.ok, true);
   assert.deepEqual(JSON.parse(r.value), { a: 1 });
 });
 
-test('exec does not fall over on a circular reference', async () => {
+test('exec does not crash on a circular reference', async () => {
   const { img } = makeImage();
   const r = await img.exec('const o = {}; o.o = o; return o');
   assert.equal(r.ok, true);
   assert.ok(typeof r.value === 'string' && r.value.length > 0);
 });
 
-test('handle ignores junk and sends nothing', async () => {
+test('handle ignores garbage and sends nothing', async () => {
   const { img, sent } = makeImage();
   await img.handle(null);
   await img.handle({});
@@ -97,7 +97,7 @@ test('handle ignores junk and sends nothing', async () => {
   assert.deepEqual(sent, []);
 });
 
-test('snapshot carries checked on a checkbox and selected on an option', async () => {
+test("snapshot carries a checkbox's checked and an option's selected", async () => {
   const { img, doc } = makeImage(
     '<input id="c" type="checkbox">' +
     '<select id="s"><option value="a">a</option><option value="b">b</option></select>'
@@ -130,7 +130,7 @@ function key(dom, doc, init) {
     { key: 'Enter', bubbles: true, cancelable: true, ...init }));
 }
 
-test('Ctrl+Enter in the image asks the shell to send the turn', () => {
+test('Ctrl+Enter in the image asks the shell to commit a turn', () => {
   const { dom, doc, commits } = installed(() => true);
   key(dom, doc, { ctrlKey: true });
   assert.equal(commits().length, 1);
@@ -158,5 +158,112 @@ test('another key with Ctrl does not start a turn', () => {
 test("a synthetic Ctrl+Enter from the model's code is ignored", () => {
   const { dom, doc, commits } = installed(e => e.isTrusted);
   key(dom, doc, { ctrlKey: true });
-  assert.equal(commits().length, 0, 'the model must not send a turn on the human\'s behalf');
+  assert.equal(commits().length, 0, 'the model must not commit a turn on the human behalf');
+});
+
+// --- What the model adds is editable by default ---
+
+const tick = () => new Promise(r => setTimeout(r, 0));
+
+function withPage(html = '<input id="q"><div id="out"></div><div id="notes" hidden></div>') {
+  const it = makeImage(html);
+  it.img.install();
+  return it;
+}
+
+test('a block of text the model adds becomes editable; its children inherit rather than repeat it', async () => {
+  const { img, doc } = withPage();
+  await img.exec('document.getElementById("out").innerHTML = "<section id=s><h2>Title</h2><p>Body</p></section>"');
+  assert.equal(doc.querySelector('#s').getAttribute('contenteditable'), 'true');
+  assert.equal(doc.querySelector('h2').getAttribute('contenteditable'), null);
+  assert.equal(doc.querySelector('#out').getAttribute('contenteditable'), null,
+    'the scaffold container is not touched when the model added elements into it');
+});
+
+test('bare text the model puts into an element makes that element editable', async () => {
+  const { img, doc } = withPage();
+  await img.exec('document.getElementById("out").textContent = "391"');
+  assert.equal(doc.querySelector('#out').getAttribute('contenteditable'), 'true');
+});
+
+test("the model's own choice stands: contenteditable=false and =true are left as they are", async () => {
+  const { img, doc } = withPage();
+  await img.exec(
+    'document.getElementById("out").innerHTML =' +
+    ' "<p id=ro contenteditable=false>status</p><p id=rw contenteditable=true>text</p>"'
+  );
+  assert.equal(doc.querySelector('#ro').getAttribute('contenteditable'), 'false');
+  assert.equal(doc.querySelector('#rw').getAttribute('contenteditable'), 'true');
+});
+
+test('controls inside an editable block stay clickable', async () => {
+  const { img, doc } = withPage();
+  await img.exec(
+    'document.getElementById("out").innerHTML =' +
+    ' "<div id=card><p>Plan</p><button id=b>go</button><a id=l href=#>more</a><button id=keep contenteditable=true>x</button></div>"'
+  );
+  assert.equal(doc.querySelector('#card').getAttribute('contenteditable'), 'true');
+  assert.equal(doc.querySelector('#b').getAttribute('contenteditable'), 'false');
+  assert.equal(doc.querySelector('#l').getAttribute('contenteditable'), 'false');
+  assert.equal(doc.querySelector('#keep').getAttribute('contenteditable'), 'true', "the model's own attribute stands");
+});
+
+test('code, styles, graphics and empty containers are not made editable', async () => {
+  const { img, doc } = withPage();
+  await img.exec(
+    'const out = document.getElementById("out");' +
+    'out.insertAdjacentHTML("beforeend", "<style id=st>#x{color:red}</style><canvas id=cv></canvas><div id=empty></div>");' +
+    'out.insertAdjacentHTML("beforeend", "<svg id=sv><text>label</text></svg>");' +
+    'const b = document.createElement("button"); b.id = "lone"; b.textContent = "ok"; out.append(b);'
+  );
+  for (const id of ['st', 'cv', 'empty', 'sv', 'lone']) {
+    assert.equal(doc.getElementById(id).getAttribute('contenteditable'), null, id);
+  }
+  assert.equal(doc.querySelector('text').getAttribute('contenteditable'), null);
+});
+
+test('#q and the hidden #notes are left alone', async () => {
+  const { img, doc } = withPage();
+  await img.exec('document.getElementById("notes").innerHTML = "<p id=n>remember this</p>"');
+  assert.equal(doc.querySelector('#n').getAttribute('contenteditable'), null);
+  assert.equal(doc.querySelector('#notes').getAttribute('contenteditable'), null);
+});
+
+test("making the model's output editable does not reach the human's diff", async () => {
+  const { img, doc } = withPage();
+  await img.exec('document.getElementById("out").innerHTML = "<p id=p>hello</p>"');
+  await tick();
+  assert.equal(doc.querySelector('#p').getAttribute('contenteditable'), 'true');
+  assert.equal(img.buildDiff(), '');
+});
+
+test('what the human adds is not touched — only the model output is made editable', async () => {
+  const { img, doc } = withPage();
+  const p = doc.createElement('p');
+  p.textContent = 'mine';
+  doc.getElementById('out').append(p);
+  await tick();
+  await img.exec('return 1');
+  assert.equal(p.getAttribute('contenteditable'), null);
+});
+
+test('what the model added before an error is still made editable', async () => {
+  const { img, doc } = withPage();
+  const r = await img.exec('document.getElementById("out").innerHTML = "<p id=p>partial</p>"; noSuchThing();');
+  assert.equal(r.ok, false);
+  assert.equal(doc.querySelector('#p').getAttribute('contenteditable'), 'true');
+});
+
+test("when the model's code awaits after adding, the image's own writes still stay out of the diff", async () => {
+  // The card is added synchronously, so it is the model's; after the await the
+  // nested button is no longer in the attribution set, and without dropping the
+  // image's own writes its contenteditable="false" would read as a human edit.
+  const { img, doc } = withPage();
+  await img.exec(
+    'document.getElementById("out").innerHTML = "<div id=card><p>Plan</p><button id=b>go</button></div>";' +
+    'await new Promise(r => setTimeout(r, 5));'
+  );
+  await tick();
+  assert.equal(doc.querySelector('#b').getAttribute('contenteditable'), 'false');
+  assert.equal(img.buildDiff(), '');
 });

@@ -6,6 +6,7 @@ import { mkdtemp, writeFile, rm, readFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { createApp } from '../server/index.js';
+import { frameTurn } from '../server/agent.js';
 
 const PACKAGE_JSON_NEEDLE = '"name": "aiborda"';
 
@@ -16,10 +17,10 @@ async function withServer(opts, fn) {
 }
 
 // Writes an HTTP request straight into the socket, bypassing the WHATWG URL
-// parsing that fetch() does on the client (and which already collapses ".."
-// itself). That way the request line reaches the server exactly as written
-// here. The Host defaults to the correct one (127.0.0.1:port) so that a probe
-// tests what its name says rather than bouncing off the Host check early.
+// parsing that fetch() does on the client (and which already collapses "../"
+// by itself). That way the request line reaches the server exactly as written
+// here. The Host defaults to the correct one (127.0.0.1:port) so that the probe
+// tests what its name claims rather than bouncing off the Host check early.
 function rawRequest(port, target, { host } = {}) {
   const hostHeader = host ?? `127.0.0.1:${port}`;
   return new Promise((resolve, reject) => {
@@ -42,11 +43,11 @@ function rawRequest(port, target, { host } = {}) {
 }
 
 test('a request with a foreign Host is rejected with 403, one with the right Host (127.0.0.1 or localhost) goes through', async () => {
-  // The loopback is not a boundary. An attacker's domain that resolves to
-  // 127.0.0.1 makes the victim's browser send requests here with a foreign
-  // Host — that covers both DNS rebinding and a cross-site POST (CORS forbids
-  // reading the response, not sending the request; a simple POST needs no
-  // preflight). The answer must depend on the Host.
+  // The loopback is not a boundary. An attacker's domain resolving to 127.0.0.1
+  // makes the victim's browser send requests here with a foreign Host — that is
+  // both DNS rebinding and a cross-site POST (CORS forbids reading the response,
+  // not sending the request; a simple POST needs no preflight). The answer must
+  // depend on the Host.
   await withServer({}, async (base, app) => {
     const bad = await rawRequest(app.port, '/api/config', { host: 'evil.example:80' });
     assert.equal(bad.status, 403);
@@ -59,20 +60,20 @@ test('a request with a foreign Host is rejected with 403, one with the right Hos
   });
 });
 
-test('a second listen() on a busy port is rejected without bringing the process down', async () => {
+test('a second listen() on a busy port is rejected without taking the process down', async () => {
   const app1 = createApp({});
   const app2 = createApp({});
   try {
     await app1.listen(0, 0);
     // app2's imgPort is 0 as well (not app1.imagePort, which is taken, and not
-    // the default 8731): otherwise a successful bind of app2's second port
-    // would be left hanging as an uncaught socket until the end of the run —
-    // assert.rejects catches the Promise.all rejection from the first failing
-    // promise, but neither cancels nor closes the neighbour that did come up.
+    // the default 8731): otherwise app2's successful bind of the second port
+    // would stay behind as an uncaught socket for the rest of the run —
+    // assert.rejects catches Promise.all rejecting on the first failed promise,
+    // but it neither cancels nor closes the neighbour that already came up.
     await assert.rejects(() => app2.listen(app1.port, 0), e => e.code === 'EADDRINUSE');
     // Before the fix, an unhandled 'error' event on the server killed the whole
-    // node --test process (not just this check) — here we simply confirm that
-    // app1 carries on answering as if nothing happened.
+    // node --test process (not just this check) — here we simply make sure app1
+    // keeps answering as if nothing happened.
     const res = await fetch(`http://127.0.0.1:${app1.port}/api/config`);
     assert.equal(res.status, 200);
   } finally {
@@ -88,10 +89,10 @@ test('GET // with a malformed path gets a 400 (the branch was live but uncovered
   });
 });
 
-test('serveStatic: .html/.css with the right content-type, / serves index.html, a file with no dot is octet-stream, a non-ASCII name is decoded', async () => {
+test('serveStatic: .html/.css get the right content-type, / serves index.html, a file with no dot is octet-stream, a non-ASCII name is decoded', async () => {
   const webRoot = await mkdtemp(join(tmpdir(), 'aiborda-web-'));
   try {
-    await writeFile(join(webRoot, 'index.html'), '<!doctype html><title>dom agent</title>', 'utf8');
+    await writeFile(join(webRoot, 'index.html'), '<!doctype html><title>aiborda</title>', 'utf8');
     await writeFile(join(webRoot, 'style.css'), 'body { color: red }', 'utf8');
     const binBody = Buffer.from([0, 1, 2, 9, 253, 254, 255]);
     await writeFile(join(webRoot, 'noext'), binBody);
@@ -101,7 +102,7 @@ test('serveStatic: .html/.css with the right content-type, / serves index.html, 
       const idx = await fetch(base + '/');
       assert.equal(idx.status, 200);
       assert.match(idx.headers.get('content-type'), /text\/html/);
-      assert.equal(await idx.text(), '<!doctype html><title>dom agent</title>');
+      assert.equal(await idx.text(), '<!doctype html><title>aiborda</title>');
 
       const css = await fetch(base + '/style.css');
       assert.equal(css.status, 200);
@@ -158,7 +159,7 @@ function post(base, body) {
   });
 }
 
-// A stub session for the tests below: it never goes to a real model, it only
+// A stub session for the tests below: it never reaches a real model, it only
 // records the calls. Used through opts.sessionFactory.
 function stubSession(calls, extra = {}) {
   return async () => ({
@@ -196,8 +197,66 @@ test('commit starts a turn and returns a stream', async () => {
     });
     assert.equal(res.status, 200);
     await res.text();
-    assert.equal(calls[0], '#q  "" -> "hello"');
+    assert.equal(calls[0], frameTurn('#q  "" -> "hello"'));
   } finally { await app.close(); }
+});
+
+// --- The nudge: a turn that ended in text is handed back once ---
+
+// A session whose last message is set by the test; sendCustomMessage records
+// the nudge and, like a real follow-up turn, may replace the last message.
+function nudgeSession({ first, afterNudge }) {
+  const nudges = [];
+  const events = [];
+  let last = first;
+  const session = {
+    prompt: async () => { events.push('prompt'); },
+    subscribe: () => () => {},
+    abort: async () => {},
+    waitForIdle: async () => { events.push('idle'); },
+    dispose: () => {},
+    get messages() { return last ? [last] : []; },
+    sendCustomMessage: async (message, options) => {
+      nudges.push({ message, options });
+      events.push('nudge');
+      last = afterNudge;
+    },
+  };
+  return { factory: async () => ({ session }), nudges, events };
+}
+
+const say = text => ({ role: 'assistant', stopReason: 'stop', content: [{ type: 'text', text }] });
+
+test('a turn that ended in text gets one nudge, then the stream finishes', async () => {
+  const s = nudgeSession({ first: say('The answer is 42.'), afterNudge: say('done') });
+  await withServer({ sessionFactory: s.factory }, async base => {
+    const body = await (await post(base, { diff: 'd' })).text();
+    assert.match(body, /event: done/);
+  });
+  assert.equal(s.nudges.length, 1);
+  assert.equal(s.nudges[0].options.triggerTurn, true);
+  assert.ok(s.nudges[0].message.content.includes('The answer is 42.'));
+  // the nudged turn is waited for before "done" goes out
+  assert.deepEqual(s.events, ['prompt', 'idle', 'nudge', 'idle']);
+});
+
+test('a turn that ended without text, or with the log word, is not nudged', async () => {
+  for (const first of [say('done'), { role: 'assistant', stopReason: 'stop', content: [] }]) {
+    const s = nudgeSession({ first });
+    await withServer({ sessionFactory: s.factory }, async base => {
+      await (await post(base, { diff: 'd' })).text();
+    });
+    assert.equal(s.nudges.length, 0);
+  }
+});
+
+test('a second miss is left alone: one nudge per human turn, no loop', async () => {
+  const s = nudgeSession({ first: say('Here it is.'), afterNudge: say('Still text.') });
+  await withServer({ sessionFactory: s.factory }, async base => {
+    const body = await (await post(base, { diff: 'd' })).text();
+    assert.match(body, /event: done/);
+  });
+  assert.equal(s.nudges.length, 1);
 });
 
 test('abort reaches the session', async () => {
@@ -212,14 +271,14 @@ test('abort reaches the session', async () => {
   try {
     await fetch(`http://127.0.0.1:${app.port}/api/commit`, {
       method: 'POST', headers: { 'content-type': 'application/json' },
-      body: JSON.stringify({ diff: 'x' }),
+      body: JSON.stringify({ diff: 'd' }),
     }).then(r => r.text());
     await fetch(`http://127.0.0.1:${app.port}/api/abort`, { method: 'POST' });
     assert.ok(calls.includes('abort'));
   } finally { await app.close(); }
 });
 
-test('a page_exec result with a foreign id is discarded, the server stays alive', async () => {
+test("a page_exec result with someone else's id is dropped, the server stays alive", async () => {
   const app = createApp({});
   await app.listen(0, 0);
   try {
@@ -259,6 +318,7 @@ test('the model chosen by pi reaches an already connected shell', async () => {
   }
 });
 
+
 test('a new SSE subscription receives the model pi has already chosen', async () => {
   const model = { provider: 'pi', id: 'saved-default' };
   const app = createApp({
@@ -288,6 +348,7 @@ test('a new SSE subscription receives the model pi has already chosen', async ()
   }
 });
 
+
 test('a page_exec from the model reaches the SSE subscriber and comes back as a result', async () => {
   let callPage = null;
   const app = createApp({
@@ -300,7 +361,7 @@ test('a page_exec from the model reaches the SSE subscriber and comes back as a 
   await app.listen(0, 0);
   let reader = null;
   try {
-    // subscribe to events the way the shell does
+    // subscribe to the events, the way the shell does
     const es = await fetch(`http://127.0.0.1:${app.port}/api/events`);
     reader = es.body.getReader();
     const dec = new TextDecoder();
@@ -308,12 +369,12 @@ test('a page_exec from the model reaches the SSE subscriber and comes back as a 
     // bring the session up — it is created lazily on the first turn
     await fetch(`http://127.0.0.1:${app.port}/api/commit`, {
       method: 'POST', headers: { 'content-type': 'application/json' },
-      body: JSON.stringify({ diff: 'x' }),
+      body: JSON.stringify({ diff: 'd' }),
     }).then(r => r.text());
 
     const pending = callPage('return 2 + 2');
-    // Read until we see the frame with the request: other events may travel in
-    // the stream, and a single read() need not return a whole frame.
+    // Keep reading until the request frame shows up: other events can be in the
+    // stream, and one read() is not obliged to return a whole frame.
     let buf = '', m = null;
     for (let i = 0; i < 10 && !m; i++) {
       const { value, done } = await reader.read();
@@ -321,7 +382,7 @@ test('a page_exec from the model reaches the SSE subscriber and comes back as a 
       buf += dec.decode(value, { stream: true });
       m = /"id":"(p\d+)"/.exec(buf);
     }
-    assert.ok(m, 'the stream should carry a page_exec request with an id: ' + buf);
+    assert.ok(m, 'the stream must carry a page_exec request with an id: ' + buf);
 
     await fetch(`http://127.0.0.1:${app.port}/api/page-result`, {
       method: 'POST', headers: { 'content-type': 'application/json' },
@@ -329,9 +390,9 @@ test('a page_exec from the model reaches the SSE subscriber and comes back as a 
     });
     assert.deepEqual(await pending, { ok: true, value: '4' });
   } finally {
-    // Release the stream before close(): otherwise the open connection holds
-    // the server, and on a failed assert close() waits for it forever — the
-    // test hangs instead of failing.
+    // Release the stream before close(): otherwise the open connection holds the
+    // server, and on a failed assert close() waits for it forever — the test
+    // hangs instead of failing.
     try { await reader?.cancel(); } catch {}
     await app.close();
   }
@@ -339,13 +400,13 @@ test('a page_exec from the model reaches the SSE subscriber and comes back as a 
 
 test('stream headers: /api/commit answers with text/event-stream', async () => {
   await withServer({ sessionFactory: stubSession([]) }, async base => {
-    const res = await post(base, { diff: 'x' });
+    const res = await post(base, { diff: 'd' });
     assert.match(res.headers.get('content-type'), /text\/event-stream/);
     await res.text();
   });
 });
 
-test('a broken request body does not bring the server down', async () => {
+test('a broken request body does not take the server down', async () => {
   await withServer({ sessionFactory: stubSession([]) }, async base => {
     const bad = await fetch(base + '/api/commit', {
       method: 'POST', headers: { 'content-type': 'application/json' },
@@ -353,13 +414,13 @@ test('a broken request body does not bring the server down', async () => {
     });
     assert.notEqual(bad.status, 200);
     // The server must stay alive — the next normal request has to go through.
-    const ok = await post(base, { diff: 'x' });
+    const ok = await post(base, { diff: 'd' });
     assert.equal(ok.status, 200);
     await ok.text();
   });
 });
 
-test('/api/abort with no turn in progress does not fail and returns ok', async () => {
+test('/api/abort with no turn in flight does not fail and returns ok', async () => {
   await withServer({}, async base => {
     const res = await fetch(base + '/api/abort', { method: 'POST' });
     assert.equal(res.status, 200);
@@ -367,13 +428,13 @@ test('/api/abort with no turn in progress does not fail and returns ok', async (
   });
 });
 
-// --- Beyond the plan: resilience of the page_exec channel ---
+// --- Beyond the plan: robustness of the page_exec channel ---
 
-test('the session fails to come up (no model/key) — commit emits an error event, the server stays alive', async () => {
+test('the session fails to start (no model/key) — commit emits an error event, the server stays alive', async () => {
   await withServer({
     sessionFactory: async () => { throw new Error('no model available'); },
   }, async base => {
-    const res = await post(base, { diff: 'x' });
+    const res = await post(base, { diff: 'd' });
     assert.equal(res.status, 200);
     assert.match(res.headers.get('content-type'), /text\/event-stream/);
     const events = await readSse(res);
@@ -386,7 +447,7 @@ test('the session fails to come up (no model/key) — commit emits an error even
   });
 });
 
-test('the shell disconnected mid-turn: the page_exec call is rejected, the server stays alive', async () => {
+test('the shell disconnected mid-turn: a page_exec call is rejected, the server stays alive', async () => {
   let callPage = null;
   await withServer({
     sessionFactory: async ({ callPage: fn }) => {
@@ -397,7 +458,7 @@ test('the shell disconnected mid-turn: the page_exec call is rejected, the serve
   }, async base => {
     const ctrl = new AbortController();
     await fetch(base + '/api/events', { signal: ctrl.signal });
-    await post(base, { diff: 'x' }).then(r => r.text()); // brings the session up
+    await post(base, { diff: 'd' }).then(r => r.text()); // brings the session up
 
     ctrl.abort(); // the shell disconnected — the only subscriber is gone
     await new Promise(r => setTimeout(r, 100)); // let the server process the close
@@ -481,29 +542,29 @@ test('the shell reconnecting restores the page_exec channel', async () => {
   });
 });
 
-test('escaping web/ is forbidden: traversals over a raw socket, bypassing client-side normalisation', async () => {
-  // web/ does not exist yet by default (DEFAULT_WEB_ROOT), so the only file
-  // that could realistically be read by escaping outwards is the repository's
-  // package.json (it sits one level above web/). If containment were broken,
-  // one of these requests would return 200 with its contents.
+test('escaping web/ is forbidden: traversals over a raw socket, bypassing client-side normalization', async () => {
+  // web/ does not exist by default (DEFAULT_WEB_ROOT), so the only file that
+  // could actually be read via a traversal is the repository's package.json (it
+  // is one level above web/). Were containment broken, one of these requests
+  // would return 200 with its contents.
   const real = await readFile(fileURLToPath(new URL('../package.json', import.meta.url)), 'utf8');
   assert.ok(real.includes(PACKAGE_JSON_NEEDLE), 'the reference string must be in the real package.json');
 
   await withServer({}, async (base, app) => {
     const probes = [
       '/../package.json',              // a literal ".." — new URL() clamps it to the root while parsing the pathname
-      '/%2e%2e/package.json',          // percent-encoded dots — the WHATWG URL parser recognises %2e as "." when looking for dot segments
-      '/%2e%2e%2fpackage.json',        // dots and slash encoded together — one segment on input, after decodeURIComponent it becomes "/../package.json" and is clamped by normalize()
-      '/..%2fpackage.json',            // literal dots, encoded slash (%2f) — decodeURIComponent yields a real "../", but the pathname is always absolute: normalize() clamps "../" to the root instead of letting it escape
+      '/%2e%2e/package.json',          // percent-encoded dots — the WHATWG URL parser recognizes %2e as "." when looking for dot segments
+      '/%2e%2e%2fpackage.json',        // dots and slash encoded together — one segment on input, which decodeURIComponent turns into "/../package.json" and normalize() clamps
+      '/..%2fpackage.json',            // literal dots, encoded slash (%2f) — decodeURIComponent yields a real "../", but the pathname is always absolute: normalize() clamps "../" to the root rather than letting it escape
       '/..%2Fpackage.json',            // the same in upper case
       '/..\\package.json',             // a backslash — for the http scheme the WHATWG URL parser treats it as "/" during parsing, after which it is an ordinary ".."
-      '/..%5cpackage.json',            // an encoded backslash (lower case) — after decoding this is a literal "\" inside the file name (not a separator on POSIX); it is looked up as one recognisable file and not found
+      '/..%5cpackage.json',            // an encoded backslash (lower case) — after decoding this is a literal "\" inside the file name (not a separator on POSIX), looked up as one plausible file and not found
       '/..%5Cpackage.json',            // the same in upper case
-      '/foo/%2e%2e/%2e%2e/package.json', // a nested traversal from a subdirectory
+      '/foo/%2e%2e/%2e%2e/package.json', // a nested traversal out of a subdirectory
       '/./../package.json',            // mixed segments
       '/etc/passwd',                   // an absolute path with no traversal — catches the join() vs resolve() bug
-      '//etc/passwd',                  // "//" — the WHATWG URL parser reads this as protocol-relative: "etc" becomes a (fictitious) host during parsing, the pathname collapses to "/passwd" — it never reaches the traversal logic in serveStatic in the usual form at all
-      '/package.json%00.html',         // a null byte after the real name — decodeURIComponent yields a literal \0 in the name, fs.readFile throws on such a path, and it is caught as a 404
+      '//etc/passwd',                  // "//" — the WHATWG URL parser reads this as protocol-relative: "etc" becomes a (bogus) host during parsing and the pathname collapses to "/passwd", so the traversal logic in serveStatic is never reached in the usual form
+      '/package.json%00.html',         // a null byte after a real name — decodeURIComponent yields a literal \0 in the name, fs.readFile throws on such a path and it is caught as a 404
       '/%00package.json',              // a null byte at the start of the name
       '/index.html%00',                // a null byte at the end
     ];
@@ -512,7 +573,7 @@ test('escaping web/ is forbidden: traversals over a raw socket, bypassing client
       const { status, body } = await rawRequest(app.port, target);
       assert.notEqual(status, 200, `${target} must not return 200`);
       assert.equal(status, 404, `${target} must get a 404`);
-      assert.equal(body.includes(PACKAGE_JSON_NEEDLE), false, `${target} must not return the contents of package.json`);
+      assert.equal(body.includes(PACKAGE_JSON_NEEDLE), false, `${target} must not serve the contents of package.json`);
     }
   });
 });
@@ -527,7 +588,7 @@ test('the image is served from the second port', async () => {
     const res = await fetch(`http://127.0.0.1:${app.imagePort}/image.html`);
     assert.equal(res.status, 200);
     const html = await res.text();
-    assert.ok(html.includes('id="q"'), 'the stub is in place');
+    assert.ok(html.includes('id="q"'), 'the scaffold is in place');
     assert.ok(html.includes('image-boot.js'), 'the loader is wired up');
     assert.equal(html.includes('sandbox'), false, 'the sandbox attribute is not used');
   } finally { await app.close(); }
@@ -542,12 +603,12 @@ test("/api/config returns the image's origin", async () => {
   } finally { await app.close(); }
 });
 
-test('the image port checks the Host the same way the shell does', async () => {
-  // fetch() will not let the Host header be overridden — undici (like the
-  // browser fetch) considers it forbidden and silently sends the real address
-  // instead of the given one (verified: with headers:{host:'evil.example'} the
-  // server still receives 127.0.0.1:port). That is exactly why the shell's Host
-  // check already uses rawRequest — the same trick is needed here.
+test('the image port checks Host the same way the shell does', async () => {
+  // fetch() does not let you override the Host header — undici (like the browser
+  // fetch) treats it as forbidden and quietly sends the real address instead of
+  // the given one (verified: with headers:{host:'evil.example'} the server still
+  // sees 127.0.0.1:port). That is exactly why the shell's Host check already
+  // uses rawRequest — the same trick is needed here.
   const app = createApp({});
   await app.listen(0, 0);
   try {

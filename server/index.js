@@ -3,7 +3,7 @@ import { readFile } from 'node:fs/promises';
 import { join, normalize } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { createBridge } from './bridge.js';
-import { startSession } from './agent.js';
+import { frameTurn, nudgeMessage, startSession, strayText } from './agent.js';
 import { createPrinter } from './stream-log.js';
 
 const DEFAULT_WEB_ROOT = fileURLToPath(new URL('../web/', import.meta.url));
@@ -29,9 +29,9 @@ function sse(res, event, data) {
 }
 
 // We read the request body ourselves: the built-in http module does not parse
-// JSON. Broken JSON is not swallowed here — it is thrown outwards, and the
-// caller (the route handler inside createServer's shared try/catch) decides
-// how to answer without bringing the process down.
+// JSON. Broken JSON is not swallowed here — it throws outward, and the calling
+// code (the route handler inside createServer's shared try/catch) decides how
+// to answer without taking the process down.
 function readJson(req) {
   return new Promise((resolve, reject) => {
     const chunks = [];
@@ -46,17 +46,17 @@ function readJson(req) {
 }
 
 async function serveStatic(res, pathname, root) {
-  // The order matters here: decodeURIComponent → normalize → join → startsWith.
+  // The order here matters: decodeURIComponent → normalize → join → startsWith.
   // new URL(req.url, ...) in the handler below collapses dot segments in the
   // pathname (including the %2e form — the WHATWG parser does that itself), but
   // it does not decode percent escapes at all, and it encodes non-ASCII instead.
-  // So without decodeURIComponent a non-ASCII file name in web/ would never be
-  // found. decodeURIComponent can re-create "/../" out of "%2e%2e%2f" — but the
-  // pathname is always absolute (it starts with "/"), and normalize() on an
-  // absolute path clamps "../" to the root instead of letting it escape above.
-  // normalize and startsWith(root) are the two real lines of defence; join (not
-  // resolve!) is what keeps an absolute second argument from replacing the base
-  // entirely.
+  // So without decodeURIComponent a file in web/ with a non-ASCII name would
+  // never be found. decodeURIComponent can re-create "/../" out of "%2e%2e%2f" —
+  // but the pathname is always absolute (it starts with "/"), and normalize() on
+  // an absolute path clamps "../" to the root rather than letting it escape
+  // above it. normalize and startsWith(root) are the two real lines of defense;
+  // join (not resolve!) is what stops an absolute second argument from replacing
+  // the base entirely.
   let decoded;
   try { decoded = decodeURIComponent(pathname); }
   catch { return json(res, 400, { error: 'malformed path' }); }
@@ -77,8 +77,8 @@ export function createApp(opts = {}) {
   const root = withTrailingSlash(opts.webRoot ?? DEFAULT_WEB_ROOT);
 
   const bridge = createBridge({ send: null });
-  // The model's stream goes to stdout: text, reasoning and tool calls are
-  // visible as they are generated. opts.print === false silences it in tests.
+  // The model's stream goes to stdout: text, reasoning and tool calls as they
+  // are generated. opts.print === false silences it in tests.
   const printEvent = opts.print === false ? () => {} : createPrinter();
 
   // pi owns the model: we have no configuration of our own, so we simply ask
@@ -89,9 +89,9 @@ export function createApp(opts = {}) {
   };
   const listeners = new Set();
 
-  // The shell holds an open SSE; over it the server sends page_exec requests
-  // and session events. The way back is a plain POST: Node has no WebSocket
-  // server, and pulling in ws for a single channel is not worth it.
+  // The shell keeps an SSE connection open; over it the server sends page_exec
+  // requests and session events. The way back is a plain POST: Node has no
+  // WebSocket server, and pulling in ws for a single channel is not worth it.
   function broadcast(event, data) {
     for (const res of listeners) {
       try { sse(res, event, data); } catch { listeners.delete(res); }
@@ -124,15 +124,24 @@ export function createApp(opts = {}) {
       'cache-control': 'no-cache',
       connection: 'keep-alive',
     });
-    // ensureSession() sits inside the try, not before writeHead: if the session
-    // fails to come up (no model, no key), that has to leave as an error event
-    // inside the stream that already started, rather than derailing the reply
-    // back into a JSON 500 from the outer catch — the shell expects SSE on this
-    // route.
+    // ensureSession() is inside the try, not before writeHead: if the session
+    // fails to come up (no model, no key), that has to go out as an error event
+    // inside the stream that has already begun, not derail the response back
+    // into a JSON 500 from the outer catch — the shell expects SSE on this
+    // route specifically.
     try {
       const session = await ensureSession();
-      await session.prompt(String(body.diff ?? ''));
+      await session.prompt(frameTurn(String(body.diff ?? '')));
       await session.waitForIdle();
+      // A closing remark in text is the model's native habit, and the prompt
+      // only weakens it. If the turn still ended in text, hand it back once so
+      // the model moves it onto the page; a second miss is left alone rather
+      // than looped on. A turn with no text at all is fine as it is.
+      const stray = strayText(session.messages);
+      if (stray !== null) {
+        await session.sendCustomMessage(nudgeMessage(stray), { triggerTurn: true });
+        await session.waitForIdle();
+      }
       sse(res, 'done', {});
     } catch (e) {
       sse(res, 'error', { message: String(e.message) });
@@ -151,12 +160,12 @@ export function createApp(opts = {}) {
 
     // The loopback is not a boundary. An attacker's domain that resolves to
     // 127.0.0.1 (DNS rebinding) makes the victim's browser send requests here
-    // with a foreign Host — and that can be a read (an error message with the
-    // OS user name in the path) or a write (/api/commit). A cross-site POST is
-    // a simple request, no preflight needed; CORS forbids reading someone
+    // with someone else's Host — and that can be a read (an error message with
+    // the OS user name in the path) or a write (/api/commit). A cross-site POST
+    // is a simple request; no preflight is needed. CORS forbids reading someone
     // else's response, not sending the request, so the absence of CORS headers
-    // is not a defence in itself. We only answer when the client aimed at this
-    // very address.
+    // is not a defense in itself. We answer only when the client actually aimed
+    // at this address.
     const port = server.address()?.port;
     const allowedHosts = new Set([`127.0.0.1:${port}`, `localhost:${port}`]);
     if (!allowedHosts.has(String(req.headers.host).toLowerCase())) {
@@ -179,10 +188,10 @@ export function createApp(opts = {}) {
           connection: 'keep-alive',
         });
         // writeHead() by itself sends nothing to the socket — Node buffers the
-        // headers until the first write()/end(). Here any amount of time can
-        // pass before the first event (the page is waiting for a page_exec
-        // request), so without an explicit flushHeaders() the client would hang
-        // waiting for the response status itself, not just for data.
+        // headers until the first write()/end(). Here an arbitrary amount of
+        // time can pass before the first event (the page is waiting for a
+        // page_exec request), so without an explicit flushHeaders() the client
+        // would hang waiting for the response status itself, not just the data.
         res.flushHeaders();
         listeners.add(res);
         // SSE connects after the first /api/config. If warmup finished between
@@ -190,9 +199,9 @@ export function createApp(opts = {}) {
         // listeners; this snapshot closes that race window.
         if (state.session) sse(res, 'model', modelRef());
         // Every new connection re-installs the bridge's sender — that is how
-        // the channel is restored after the shell reconnects: as long as at
-        // least one listener is alive the bridge can send requests; when the
-        // last one closes it goes mute and rejects everything pending.
+        // the channel is restored after the shell reconnects: while at least
+        // one listener is alive the bridge can send requests; when the last one
+        // closes it goes mute and rejects everyone waiting.
         bridge.setSender(m => broadcast('page_exec', m));
         req.on('close', () => {
           listeners.delete(res);
@@ -215,9 +224,9 @@ export function createApp(opts = {}) {
     }
   });
 
-  // The image lives on its own port, and that is the whole isolation
+  // The image lives on a separate port, and that is the whole isolation
   // mechanism: a different origin gives it localStorage and the rest of HTML5,
-  // but does not let it reach the shell. The sandbox attribute is not used —
+  // but denies it any reach into the shell. The sandbox attribute is not used —
   // it would give less, and worse.
   const imageServer = createServer(async (req, res) => {
     let url;
@@ -233,7 +242,8 @@ export function createApp(opts = {}) {
     }
     const path = url.pathname === '/' ? '/image.html' : url.pathname;
     // `root` is the constant already computed in createApp, with a trailing
-    // slash — not the raw opts.webRoot: the startsWith check rests on that slash.
+    // slash, rather than the raw opts.webRoot: the startsWith check rests on
+    // that slash.
     return await serveStatic(res, path, root);
   });
 
@@ -271,6 +281,6 @@ if (fileURLToPath(import.meta.url) === process.argv[1]) {
     const m = s.model;
     console.log('model:', m ? `${m.provider}/${m.id}` : '(undetermined)');
   } catch (e) {
-    console.log('the session did not come up:', e.message);
+    console.log('the session failed to start:', e.message);
   }
 }

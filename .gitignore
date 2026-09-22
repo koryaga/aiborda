@@ -1,7 +1,8 @@
 node_modules/
 .aiborda/
 
-# Working documents: specs, plans, TODO — kept locally, not in the repo
+# Working documents: specs, plans, TODO, brainstorms — kept locally, not in the repo
 /PLAN.md
 /TODO.md
 /docs/superpowers/
+/docs/pi-plugin-web-brainstorm.md
